@@ -1,6 +1,6 @@
 # Harvest Community
 
-Harvest 是一个本地优先、可校准的个人复盘 CLI。用户 clone 后通过一个中文向导完成 API 配置、用户画像、个人问题集和真实联网测试，然后即可开始日常复盘。
+Harvest 是一个本地优先、可校准的个人复盘 CLI。它以人的体验、选择、成长和自我观察为中心，具体项目只是帮助回忆的事实载体。用户 clone 后通过中文向导完成 API 配置、用户画像、个人问题集和真实联网测试，然后即可开始日常复盘。
 
 > [⬇️ 一键下载 Harvest 最新版（ZIP）](https://github.com/MoonMing-ely/harvest-community/archive/refs/heads/main.zip)
 >
@@ -11,10 +11,12 @@ Harvest 是一个本地优先、可校准的个人复盘 CLI。用户 clone 后�
 1. 配置 AI 服务商与 API Key，并用最小真实请求检查网络和 JSON 格式。
 2. 通过六组选项和一个具体经历，生成可确认的画像与 5～7 个个人问题。
 3. 运行一次明确标记的真实测试；测试日志、答案和网络追踪不会成为正式日报。
-4. 按“画像 / 问题 / 日志内容 / 格式”提出建议并确认修改，最多三轮。
+4. 按“画像 / 问题 / 日志内容 / 格式”反复修改、复测或立即完成；每个动作都有明确说明。
 5. 完成后直接运行 `harvest`，才会开始当天的正式日报。
 
 AI 只总结可观察偏好。工作风格只能作为有依据、低或中置信度的“暂定观察”；不得诊断心理、评价人格或能力。
+
+调用 AI 时终端会显示动态等待提示。画像和问题不是一次性设置：以后可运行 `harvest profile rebuild` 重走完整流程，也可用 `harvest revise YYYY-MM-DD` 修改已保存日志。
 
 ## 安装与首次使用
 
@@ -33,6 +35,7 @@ harvest show 2026-09-01
 
 harvest profile
 harvest profile recalibrate
+harvest profile rebuild
 harvest profile history
 harvest profile restore 1
 

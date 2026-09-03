@@ -64,7 +64,7 @@ def test_daily_cli_keeps_pending_when_provider_fails(tmp_path, monkeypatch) -> N
     assert result.exit_code == 0, result.output
     pending = storage.load_pending(date(2026, 9, 2))
     assert pending is not None
-    assert pending.answers["recall_cues"] == "做算法"
+    assert pending.answers["meaningful_moment"] == "做算法"
     assert pending.last_error == "offline"
 
 
@@ -93,7 +93,7 @@ def test_daily_cli_retries_bad_utf8_line_and_preserves_earlier_answers(tmp_path,
         if isinstance(response, Exception):
             saved = storage.load_pending(date(2026, 9, 4))
             assert saved is not None
-            assert saved.answers == {"recall_cues": "画了两个小时"}
+            assert saved.answers == {"meaningful_moment": "画了两个小时"}
             raise response
         return response
 
@@ -104,7 +104,7 @@ def test_daily_cli_retries_bad_utf8_line_and_preserves_earlier_answers(tmp_path,
     assert "此前答案仍已保存" in result.output
     pending = storage.load_pending(date(2026, 9, 4))
     assert pending is not None
-    assert pending.answers["recent_context"] == "算法题有进展"
+    assert pending.answers["inner_experience"] == "算法题有进展"
     assert pending.last_error == "offline"
 
 
@@ -113,7 +113,9 @@ def test_daily_cli_continues_incomplete_pending(tmp_path, monkeypatch) -> None:
     storage = Storage(config.data_dir)
     storage.ensure()
     storage.save_profile(sample_profile())
-    storage.save_pending(make_pending(date(2026, 9, 5), {"recall_cues": "已经保存的第一题"}))
+    storage.save_pending(
+        make_pending(date(2026, 9, 5), {"meaningful_moment": "已经保存的第一题"})
+    )
     monkeypatch.setattr(cli, "_context", lambda: (config, storage))
     monkeypatch.setattr(cli, "build_provider", lambda config: FakeProvider())
     monkeypatch.setattr(cli, "_snapshot", lambda config, storage, target: empty_snapshot())

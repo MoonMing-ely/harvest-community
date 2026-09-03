@@ -55,7 +55,7 @@ class ProfileContent(StrictModel):
 class UserProfile(StrictModel):
     schema_version: int = 2
     version: int = Field(ge=1)
-    stage: Literal["initial", "revised", "five_report", "manual", "restored"]
+    stage: Literal["initial", "revised", "rebuilt", "five_report", "manual", "restored"]
     created_at: datetime
     updated_at: datetime
     content: ProfileContent
@@ -249,10 +249,15 @@ class PendingDaily(StrictModel):
 
 
 class OnboardingPending(StrictModel):
-    schema_version: int = 2
+    schema_version: int = 3
     date: date
     created_at: datetime
-    step: Literal["profile_inputs", "profile_review", "trial_input", "trial_review"] = "profile_inputs"
+    mode: Literal["initial", "rebuild"] = "initial"
+    start_strategy: Literal["fresh", "current"] = "fresh"
+    baseline_profile_version: int | None = Field(default=None, ge=1)
+    step: Literal[
+        "profile_inputs", "profile_review", "trial_input", "trial_review", "post_revision"
+    ] = "profile_inputs"
     questionnaire: dict[str, str] = Field(default_factory=dict)
     daily_answers: dict[str, str] = Field(default_factory=dict)
     proposed_profile: ProfileContent | None = None
@@ -261,8 +266,8 @@ class OnboardingPending(StrictModel):
     sample_project_suggestions: list[ProjectSuggestion] = Field(default_factory=list, max_length=2)
     last_trace: NetworkTrace | None = None
     trial_run_count: int = Field(default=0, ge=0)
-    revision_round: int = Field(default=0, ge=0, le=3)
-    feedback: list[str] = Field(default_factory=list, max_length=3)
+    revision_round: int = Field(default=0, ge=0)
+    feedback: list[str] = Field(default_factory=list)
     feedback_categories: list[str] = Field(default_factory=list, max_length=4)
     last_error: str | None = None
 

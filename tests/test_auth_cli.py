@@ -1,4 +1,5 @@
 from typer.testing import CliRunner
+from contextlib import contextmanager
 
 import harvest.cli as cli
 import harvest.config as config_module
@@ -45,3 +46,35 @@ def test_test_launcher_can_isolate_keyring_service(monkeypatch) -> None:
     config_module.save_api_key("DEEPSEEK_API_KEY", "secret")
 
     assert calls == [("harvest-isolated-test", "DEEPSEEK_API_KEY", "secret")]
+
+
+def test_first_run_can_use_key_in_memory_when_keyring_is_unavailable(monkeypatch) -> None:
+    config = AppConfig(provider="deepseek")
+    monkeypatch.setattr(cli.getpass, "getpass", lambda prompt: "temporary-secret")
+    monkeypatch.setattr(
+        cli,
+        "save_api_key",
+        lambda name, value: (_ for _ in ()).throw(RuntimeError("系统凭据库不可用")),
+    )
+
+    key = cli._prompt_api_key(config, allow_session_only=True)
+
+    assert key == "temporary-secret"
+
+
+def test_ai_status_uses_animated_dots_and_explains_wait(monkeypatch) -> None:
+    captured = {}
+
+    @contextmanager
+    def fake_status(message, *, spinner):
+        captured.update(message=message, spinner=spinner)
+        yield
+
+    monkeypatch.setattr(cli.console, "status", fake_status)
+
+    with cli._ai_status("正在调用 AI"):
+        pass
+
+    assert captured["spinner"] == "dots"
+    assert "正在调用 AI" in captured["message"]
+    assert "可能需要几十秒" in captured["message"]

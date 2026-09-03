@@ -4,6 +4,7 @@ import getpass
 import json
 import re
 import subprocess
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import date, datetime
 from pathlib import Path
@@ -77,7 +78,7 @@ app = ChineseTyper(
     invoke_without_command=True,
 )
 project_app = ChineseTyper(help="维护跨天项目记忆。", no_args_is_help=True)
-profile_app = ChineseTyper(help="查看、校准和恢复用户画像。", invoke_without_command=True)
+profile_app = ChineseTyper(help="查看、校准、重建和恢复用户画像。", invoke_without_command=True)
 app.add_typer(project_app, name="project")
 app.add_typer(profile_app, name="profile")
 console = Console()
@@ -132,6 +133,42 @@ FEEDBACK_CATEGORIES = {
 class _ConnectionCheck(BaseModel):
     model_config = ConfigDict(extra="forbid")
     status: Literal["ok"]
+
+
+@contextmanager
+def _ai_status(message: str):
+    with console.status(
+        f"[cyan]{message}…[/cyan] [dim]可能需要几十秒；可按 Ctrl+C 暂停[/dim]",
+        spinner="dots",
+    ):
+        yield
+
+
+def _prompt_menu(
+    title: str,
+    options: tuple[tuple[str, str], ...],
+    *,
+    recommended: str | None = None,
+    default: str | None = None,
+) -> str | None:
+    lines = [
+        f"{key}. {label}{'（推荐）' if key == recommended else ''}"
+        for key, label in options
+    ]
+    console.print(Panel("\n".join(lines), title=title))
+    valid = {key for key, _ in options}
+    expected = "、".join(key for key, _ in options)
+    while True:
+        raw = typer.prompt(
+            f"请输入序号（{expected}），q 暂停",
+            default=default,
+            show_default=default is not None,
+        ).strip().lower()
+        if _is_pause(raw):
+            return None
+        if raw in valid:
+            return raw
+        console.print(f"[yellow]无法识别“{raw}”。请输入 {expected}，或输入 q 暂停。[/yellow]")
 
 
 def _parse_date(value: str | None) -> date:
@@ -205,19 +242,29 @@ def _show_context_snapshot(snapshot: ContextSnapshot) -> None:
     console.print(Panel("\n".join(lines) if lines else "暂无近期记忆。", title="近期记忆 · 仅本地"))
 
 
-def _read_and_save_api_key(config: AppConfig) -> bool:
+def _prompt_api_key(config: AppConfig, *, allow_session_only: bool = False) -> str | None:
     console.print(f"当前 AI 服务商：[bold]{config.provider}[/bold]；模型：[bold]{config.model}[/bold]")
     key = getpass.getpass(f"{config.api_key_name}（输入不会显示）: ").strip()
     if not key:
         console.print("[yellow]输入为空，未保存。[/yellow]")
-        return False
+        return None
     try:
         save_api_key(config.api_key_name, key)
     except RuntimeError as exc:
-        console.print(f"[red]{exc}[/red]")
-        return False
+        if not allow_session_only:
+            console.print(f"[red]{exc}[/red]")
+            return None
+        console.print(
+            "[yellow]系统凭据库不可用：Key 仅在本次运行的内存中临时使用，"
+            "不会写入文件，退出后需要重新输入。也可改用环境变量。[/yellow]"
+        )
+        return key
     console.print("[green]API Key 已保存到系统凭据库。[/green]")
-    return True
+    return key
+
+
+def _read_and_save_api_key(config: AppConfig) -> bool:
+    return _prompt_api_key(config) is not None
 
 
 def _collect_answers(
@@ -244,21 +291,37 @@ def _is_pause(value: str) -> bool:
 def _prompt_guided_choice(prompt: str, options: tuple[str, ...]) -> str | None:
     lines = [f"{index}. {item}" for index, item in enumerate(options, start=1)]
     console.print(Panel("\n".join(lines), title=prompt))
-    raw = typer.prompt("输入编号（可多选，用逗号分隔）或直接填写；回车跳过，q 暂停", default="", show_default=False)
-    if _is_pause(raw):
-        return None
-    selected: list[str] = []
-    for token in re.split(r"[,，、]", raw):
-        item = token.strip()
-        if not item:
+    while True:
+        raw = typer.prompt(
+            "可输入一个或多个编号（逗号分隔），也可直接填写自己的答案；回车跳过，q 暂停",
+            default="",
+            show_default=False,
+        )
+        if _is_pause(raw):
+            return None
+        selected: list[str] = []
+        invalid_numbers: list[str] = []
+        for token in re.split(r"[,，、]", raw):
+            item = token.strip()
+            if not item:
+                continue
+            if item.isdigit():
+                if 1 <= int(item) <= len(options):
+                    value = options[int(item) - 1]
+                else:
+                    invalid_numbers.append(item)
+                    continue
+            else:
+                value = item
+            if value not in selected:
+                selected.append(value)
+        if invalid_numbers:
+            console.print(
+                f"[yellow]编号 {'、'.join(invalid_numbers)} 不存在；请输入 1～{len(options)}，"
+                "或直接填写文字。[/yellow]"
+            )
             continue
-        if item.isdigit() and 1 <= int(item) <= len(options):
-            value = options[int(item) - 1]
-        else:
-            value = item
-        if value not in selected:
-            selected.append(value)
-    return "、".join(selected)
+        return "、".join(selected)
 
 
 def _collect_guided_profile(pending: OnboardingPending, storage: Storage) -> OnboardingPending | None:
@@ -286,7 +349,94 @@ def _collect_guided_profile(pending: OnboardingPending, storage: Storage) -> Onb
             update={"questionnaire": {**current.questionnaire, learning_key: answer}}
         )
         storage.save_onboarding(current)
-    return current
+    return _review_profile_answers(current, storage)
+
+
+def _profile_answer_items() -> tuple[tuple[str, str], ...]:
+    return tuple((key, prompt) for key, prompt, _ in GUIDED_PROFILE_CHOICES) + (
+        LEARNING_HABIT_QUESTION,
+    )
+
+
+def _show_answer_summary(
+    items: tuple[tuple[str, str], ...], answers: dict[str, str], title: str
+) -> None:
+    lines = [
+        f"{index}. {prompt}\n   [dim]{answers.get(key) or '（已跳过）'}[/dim]"
+        for index, (key, prompt) in enumerate(items, start=1)
+    ]
+    console.print(Panel("\n".join(lines), title=title))
+
+
+def _review_profile_answers(
+    pending: OnboardingPending, storage: Storage
+) -> OnboardingPending | None:
+    items = _profile_answer_items()
+    current = pending
+    while True:
+        _show_answer_summary(items, current.questionnaire, "画像问卷检查 · 仅本地")
+        action = typer.prompt(
+            "回车确认发送；输入题号修改；q 暂停",
+            default="",
+            show_default=False,
+        ).strip().lower()
+        if _is_pause(action):
+            storage.save_onboarding(current)
+            return None
+        if not action:
+            return current
+        if not action.isdigit() or not 1 <= int(action) <= len(items):
+            console.print(f"[yellow]无法识别。请输入 1～{len(items)}，回车确认，或 q 暂停。[/yellow]")
+            continue
+        index = int(action) - 1
+        key, prompt = items[index]
+        guided = next((item for item in GUIDED_PROFILE_CHOICES if item[0] == key), None)
+        if guided is not None:
+            answer = _prompt_guided_choice(prompt, guided[2])
+        else:
+            answer = typer.prompt(
+                prompt + "（可回车跳过，输入 q 暂停）", default="", show_default=False
+            ).strip()
+            if _is_pause(answer):
+                storage.save_onboarding(current)
+                return None
+        if answer is None:
+            storage.save_onboarding(current)
+            return None
+        current = _save_onboarding(
+            storage,
+            current,
+            questionnaire={**current.questionnaire, key: answer},
+        )
+
+
+def _review_trial_answers(
+    pending: OnboardingPending, storage: Storage
+) -> OnboardingPending | None:
+    items = tuple((item.id, item.prompt) for item in pending.proposed_questions)
+    current = pending
+    while True:
+        _show_answer_summary(items, current.daily_answers, "测试回答检查 · 仅本地")
+        action = typer.prompt(
+            "回车确认并调用 AI；输入题号修改；q 暂停",
+            default="",
+            show_default=False,
+        ).strip().lower()
+        if _is_pause(action):
+            storage.save_onboarding(current)
+            return None
+        if not action:
+            return current
+        if not action.isdigit() or not 1 <= int(action) <= len(items):
+            console.print(f"[yellow]无法识别。请输入 1～{len(items)}，回车确认，或 q 暂停。[/yellow]")
+            continue
+        key, prompt = items[int(action) - 1]
+        answer = typer.prompt(prompt + "（可回车跳过）", default="", show_default=False).strip()
+        current = _save_onboarding(
+            storage,
+            current,
+            daily_answers={**current.daily_answers, key: answer},
+        )
 
 
 def _show_questions(questions: list[DailyQuestion], title: str = "个人每日问题") -> None:
@@ -325,33 +475,33 @@ def _show_design_diff(
 
 
 def _select_feedback() -> tuple[list[str], str] | None:
-    console.print(
-        Panel(
-            "\n".join(f"{key}. {value}" for key, value in FEEDBACK_CATEGORIES.items()),
-            title="希望改进哪些部分",
+    while True:
+        console.print(
+            Panel(
+                "\n".join(f"{key}. {value}" for key, value in FEEDBACK_CATEGORIES.items())
+                + "\n0. 返回上一步",
+                title="希望改进哪些部分",
+            )
         )
-    )
-    raw = typer.prompt(
-        "输入编号（可多选）；直接回车表示满意，q 暂停", default="", show_default=False
-    ).strip()
-    if _is_pause(raw):
-        return None
-    if not raw:
-        return [], ""
-    categories = [
-        FEEDBACK_CATEGORIES[token]
-        for token in re.split(r"[,，、]", raw)
-        if token.strip() in FEEDBACK_CATEGORIES
-    ]
-    categories = list(dict.fromkeys(categories))
-    if not categories:
-        console.print("[yellow]没有识别到分类编号，请重新选择。[/yellow]")
-        return _select_feedback()
-    feedback = typer.prompt("请具体说明希望怎样改进").strip()
-    if not feedback:
-        console.print("[yellow]没有填写改进内容，本轮不修改。[/yellow]")
-        return [], ""
-    return categories, feedback
+        raw = typer.prompt(
+            "请输入一个或多个编号（逗号分隔），q 暂停",
+            default="",
+            show_default=False,
+        ).strip()
+        if _is_pause(raw):
+            return None
+        if raw == "0":
+            return [], ""
+        tokens = [token.strip() for token in re.split(r"[,，、]", raw) if token.strip()]
+        if not tokens or any(token not in FEEDBACK_CATEGORIES for token in tokens):
+            console.print("[yellow]无法识别。请输入 1～4，可用逗号多选；输入 0 返回。[/yellow]")
+            continue
+        categories = list(dict.fromkeys(FEEDBACK_CATEGORIES[token] for token in tokens))
+        feedback = typer.prompt("请具体说明希望怎样改进（这里可以输入文字）").strip()
+        if not feedback:
+            console.print("[yellow]改进内容不能为空；如果暂时不修改，请输入 q 暂停。[/yellow]")
+            continue
+        return categories, feedback
 
 
 def _show_trace(trace: NetworkTrace, *, include_payloads: bool = False) -> None:
@@ -377,44 +527,59 @@ def _show_trace(trace: NetworkTrace, *, include_payloads: bool = False) -> None:
 def _configure_and_test_api() -> tuple[AppConfig, ResponsesProvider] | None:
     current = load_config()
     console.print(Panel("第一步只配置 AI 服务商与 API Key。测试会发送一次最小真实请求。", title="步骤 1/4 · API 配置"))
+    session_api_key: str | None = None
     while True:
-        provider_name = typer.prompt(
-            "AI 服务商（deepseek/openai）", default=current.provider
-        ).strip().lower()
-        if _is_pause(provider_name):
+        console.print("[dim]这里选择服务商，下一步才输入 API Key。请优先选择你已有 Key 的服务商。[/dim]")
+        provider_choice = _prompt_menu(
+            "选择 AI 服务商",
+            (("1", "DeepSeek"), ("2", "OpenAI")),
+            recommended="1",
+            default="1" if current.provider == "deepseek" else "2",
+        )
+        if provider_choice is None:
             return None
-        if provider_name not in {"deepseek", "openai"}:
-            console.print("[yellow]请输入 deepseek 或 openai。[/yellow]")
-            continue
+        provider_name = {"1": "deepseek", "2": "openai"}[provider_choice]
+        if provider_name != current.provider:
+            session_api_key = None
         config = replace(current, provider=provider_name)
         save_config(config)
-        if get_api_key(config) is None and not _read_and_save_api_key(config):
-            console.print(
-                f"[yellow]未保存 Key。凭据库不可用时，请先设置环境变量 {config.api_key_name} 后重试。[/yellow]"
-            )
+        api_key = get_api_key(config) or session_api_key
+        if api_key is None:
+            session_api_key = _prompt_api_key(config, allow_session_only=True)
+            api_key = session_api_key
+        if api_key is None:
             action = console.input("[Enter] 重新输入 / q 暂停：").strip()
             if _is_pause(action):
                 return None
             continue
         try:
-            provider = build_provider(config)
-            _, _, trace = provider.generate_traced(
-                instructions='只返回 {"status":"ok"}，用于验证网络和结构化响应。',
-                input_text="Harvest 首次启动连接测试。",
-                output_type=_ConnectionCheck,
-                schema_name="harvest_connection_check",
+            provider = ResponsesProvider(
+                provider=config.provider,
+                model=config.model,
+                api_key=api_key,
             )
+            with _ai_status("正在验证 API Key、网络和响应格式"):
+                _, _, trace = provider.generate_traced(
+                    instructions='只返回 {"status":"ok"}，用于验证网络和结构化响应。',
+                    input_text="Harvest 首次启动连接测试。",
+                    output_type=_ConnectionCheck,
+                    schema_name="harvest_connection_check",
+                )
         except ProviderError as exc:
             console.print(f"[red]API 验证失败：{exc}[/red]")
-            action = console.input("r 重试 / k 更换 API Key / c 更换服务商 / q 暂停：").strip().lower()
-            if action == "r":
+            action = _prompt_menu(
+                "API 验证失败，下一步",
+                (("1", "重试"), ("2", "更换 API Key"), ("3", "更换服务商")),
+                recommended="2",
+            )
+            if action is None:
+                return None
+            if action == "1":
                 continue
-            if action == "k":
-                _read_and_save_api_key(config)
+            if action == "2":
+                session_api_key = _prompt_api_key(config, allow_session_only=True)
                 current = config
                 continue
-            if _is_pause(action):
-                return None
             current = config
             continue
         console.print("[green]✓ API Key、网络与结构化响应均可用。[/green]")
@@ -436,31 +601,57 @@ def _revise_onboarding_design(
     feedback: str,
     provider: ResponsesProvider,
     storage: Storage,
-) -> tuple[OnboardingPending, bool]:
+    *,
+    after_trial: bool,
+) -> tuple[OnboardingPending, str]:
     if pending.proposed_profile is None or not pending.proposed_questions:
         raise ValueError("首次向导缺少可修订的画像或问题集")
     try:
-        proposal = revise_onboarding(
-            pending.proposed_profile,
-            pending.proposed_questions,
-            categories,
-            feedback,
-            provider,
-            trial_answers=pending.daily_answers,
-            test_report=pending.sample_record.report if pending.sample_record else None,
-        )
+        with _ai_status("正在根据反馈修改画像、问题和日志方向"):
+            proposal = revise_onboarding(
+                pending.proposed_profile,
+                pending.proposed_questions,
+                categories,
+                feedback,
+                provider,
+                trial_answers=pending.daily_answers,
+                test_report=pending.sample_record.report if pending.sample_record else None,
+            )
     except ProviderError as exc:
         console.print(f"[red]修改失败：{exc}[/red]")
-        return _save_onboarding(storage, pending, last_error=str(exc)), False
+        return _save_onboarding(storage, pending, last_error=str(exc)), "failed"
     _show_design_diff(
         pending.proposed_profile,
         pending.proposed_questions,
         proposal.profile,
         proposal.daily_questions,
     )
-    if not typer.confirm("应用本轮修改？", default=True):
-        console.print("本轮修改未应用。")
-        return pending, False
+    if after_trial:
+        choice = _prompt_menu(
+            "如何处理这份修改方案",
+            (
+                ("1", "应用并重新测试"),
+                ("2", "应用并继续修改"),
+                ("3", "应用并完成建档"),
+                ("4", "放弃本轮方案并重写意见"),
+            ),
+            recommended="1",
+        )
+        actions = {"1": "retest", "2": "continue", "3": "finish", "4": "discard"}
+    else:
+        choice = _prompt_menu(
+            "如何处理这份修改方案",
+            (("1", "应用修改"), ("2", "放弃本轮方案并重写意见")),
+            recommended="1",
+        )
+        actions = {"1": "apply", "2": "discard"}
+    if choice is None:
+        console.print("本轮方案尚未应用，当前进度已保存。")
+        return pending, "pause"
+    action = actions[choice]
+    if action == "discard":
+        console.print("本轮方案未应用，你可以重新说明修改意见。")
+        return pending, action
     current = _save_onboarding(
         storage,
         pending,
@@ -471,14 +662,17 @@ def _revise_onboarding_design(
         feedback_categories=list(dict.fromkeys([*pending.feedback_categories, *categories])),
         last_error=None,
     )
-    return current, True
+    return current, action
 
 
-def _collect_trial_answers(pending: OnboardingPending, storage: Storage) -> OnboardingPending:
+def _collect_trial_answers(
+    pending: OnboardingPending, storage: Storage
+) -> OnboardingPending | None:
     console.print(
         Panel(
             "这是一次真实 API 测试，不是正式日报，也不会写入日报目录。\n"
-            "你可以认真回答，也可以每题直接回车；所有问题都可跳过。",
+            "你可以认真回答，也可以每题直接回车；所有问题都可跳过。\n"
+            "以后正式日志保存后，仍可用 harvest revise YYYY-MM-DD 修改。",
             title="步骤 3/4 · 测试输入、输出、网络与格式",
             border_style="yellow",
         )
@@ -489,7 +683,8 @@ def _collect_trial_answers(pending: OnboardingPending, storage: Storage) -> Onbo
         pending.daily_answers,
         lambda value: storage.save_onboarding(pending.model_copy(update={"daily_answers": value})),
     )
-    return _save_onboarding(storage, pending, daily_answers=answers)
+    pending = _save_onboarding(storage, pending, daily_answers=answers)
+    return _review_trial_answers(pending, storage)
 
 
 def _run_trial(
@@ -501,12 +696,13 @@ def _run_trial(
     if pending.proposed_profile is None:
         raise ValueError("首次向导缺少画像草案")
     try:
-        draft, trace = generate_trial_daily(
-            make_pending(pending.date, pending.daily_answers),
-            config,
-            provider,
-            pending.proposed_profile,
-        )
+        with _ai_status("正在分析回答并生成测试日志"):
+            draft, trace = generate_trial_daily(
+                make_pending(pending.date, pending.daily_answers),
+                config,
+                provider,
+                pending.proposed_profile,
+            )
     except ProviderError as exc:
         pending = _save_onboarding(storage, pending, last_error=str(exc))
         console.print(f"[red]测试失败：{exc}[/red]")
@@ -543,29 +739,48 @@ def _run_trial(
 def _finish_onboarding(pending: OnboardingPending, storage: Storage) -> None:
     if pending.proposed_profile is None or not pending.proposed_questions:
         raise ValueError("首次向导结果不完整")
+    previous = storage.load_profile() if pending.mode == "rebuild" else None
+    if pending.mode == "rebuild" and (
+        previous is None or previous.version != pending.baseline_profile_version
+    ):
+        console.print("[red]当前画像已在重建期间发生变化。为避免覆盖，请重新运行重建命令。[/red]")
+        return
     profile = next_profile(
         pending.proposed_profile,
-        None,
-        "initial" if pending.revision_round == 0 else "revised",
+        previous,
+        "rebuilt"
+        if pending.mode == "rebuild"
+        else ("initial" if pending.revision_round == 0 else "revised"),
         daily_questions=pending.proposed_questions,
     )
     storage.save_profile(profile)
-    storage.save_calibration(
-        CalibrationState(
-            onboarding_version=2,
-            onboarding_completed=True,
-            first_daily_date=None,
+    if pending.mode == "rebuild":
+        calibration = storage.load_calibration().model_copy(
+            update={"onboarding_version": 3, "onboarding_completed": True}
         )
-    )
+    else:
+        calibration = CalibrationState(
+            onboarding_version=3, onboarding_completed=True, first_daily_date=None
+        )
+    storage.save_calibration(calibration)
     # 删除问卷原文、测试答案、测试报告和网络追踪，只保留用户确认后的画像与问题集。
     storage.delete_onboarding()
+    completion = (
+        "重新建档已完成；既有正式日报和周报保持不变。"
+        if pending.mode == "rebuild"
+        else "首次调试已完成，测试数据已清除；尚未创建任何正式日报。"
+    )
     console.print(
         Panel(
-            "首次调试已完成，测试数据已清除；尚未创建任何正式日报。\n\n"
-            "直接运行 harvest：开始今天的正式复盘\n"
+            completion
+            + "\n\n"
+            "harvest：开始今天的正式复盘\n"
+            "harvest revise YYYY-MM-DD：修改已保存的日志\n"
+            "harvest profile rebuild：重新建立画像并筛选问题\n"
+            "harvest profile recalibrate：快速调整当前画像\n"
             "harvest settings：修改服务商、数据目录或提醒\n"
             "harvest --help：查看全部命令",
-            title="Harvest 已准备好",
+            title="Harvest 已准备好 · 以后仍可随时修改",
             border_style="green",
         )
     )
@@ -578,12 +793,15 @@ def _run_onboarding(
         date=date.today(), created_at=datetime.now().astimezone()
     )
     storage.save_onboarding(pending)
+    displayed_trial_run = -1
     while True:
         if pending.step == "profile_inputs":
             console.print(
                 Panel(
                     "通过六组选择和一个具体经历，建立第一版用户画像与每日问题。\n"
-                    "选择题可多选或自定义，任何一题都可以跳过。",
+                    "选择题可多选或自定义，任何一题都可以跳过。\n\n"
+                    "不用担心选错。完成后可随时运行 harvest profile rebuild，"
+                    "重新建立画像和筛选每日问题。",
                     title="步骤 2/4 · 选择与用户画像",
                 )
             )
@@ -593,7 +811,8 @@ def _run_onboarding(
                 return
             pending = collected
             try:
-                proposal = build_initial_onboarding(pending.questionnaire, provider)
+                with _ai_status("正在分析回答并生成个人画像与每日问题"):
+                    proposal = build_initial_onboarding(pending.questionnaire, provider)
             except ProviderError as exc:
                 _save_onboarding(storage, pending, last_error=str(exc))
                 console.print(f"[red]画像与问题生成失败：{exc}[/red]")
@@ -613,64 +832,145 @@ def _run_onboarding(
                 continue
             _show_profile(pending.proposed_profile, "画像草案")
             _show_questions(pending.proposed_questions, "个人每日问题草案")
-            action = console.input("[Enter] 确认并开始测试 / m 提出修改 / q 暂停：").strip().lower()
-            if _is_pause(action):
+            console.print(f"[dim]已应用修改次数：{pending.revision_round}[/dim]")
+            action = _prompt_menu(
+                "检查当前画像与问题",
+                (
+                    ("1", "使用当前版本并开始测试"),
+                    ("2", "继续修改"),
+                    ("3", "重答画像问卷"),
+                ),
+                recommended="1",
+            )
+            if action is None:
                 console.print("进度已保存，下次运行 harvest 会继续。")
                 return
-            if action == "m":
-                if pending.revision_round >= 3:
-                    console.print("[yellow]已达到三轮修改上限，请确认测试或暂停。[/yellow]")
-                    continue
+            if action == "2":
                 selection = _select_feedback()
                 if selection is None:
                     console.print("进度已保存，下次运行 harvest 会继续。")
                     return
                 categories, feedback = selection
-                if feedback:
-                    pending, _ = _revise_onboarding_design(
-                        pending, categories, feedback, provider, storage
-                    )
+                if not feedback:
+                    continue
+                pending, outcome = _revise_onboarding_design(
+                    pending,
+                    categories,
+                    feedback,
+                    provider,
+                    storage,
+                    after_trial=False,
+                )
+                if outcome == "pause":
+                    return
+                continue
+            if action == "3":
+                pending = _save_onboarding(
+                    storage,
+                    pending,
+                    start_strategy="fresh",
+                    step="profile_inputs",
+                    questionnaire={},
+                    proposed_profile=None,
+                    proposed_questions=[],
+                    daily_answers={},
+                    sample_record=None,
+                    sample_project_suggestions=[],
+                    last_trace=None,
+                )
                 continue
             pending = _save_onboarding(storage, pending, step="trial_input")
 
         if pending.step == "trial_input":
-            pending = _collect_trial_answers(pending, storage)
+            collected = _collect_trial_answers(pending, storage)
+            if collected is None:
+                console.print("测试回答已保存，下次运行会从检查页继续。")
+                return
+            pending = collected
             trial = _run_trial(pending, config, provider, storage)
             if trial is None:
                 console.print("测试进度已保存，下次运行 harvest 会继续。")
                 return
             pending = trial
+            displayed_trial_run = pending.trial_run_count
             if pending.step != "trial_review":
                 continue
 
-        if pending.step == "trial_review":
+        if pending.step in {"trial_review", "post_revision"}:
+            if (
+                pending.step == "trial_review"
+                and pending.sample_record is not None
+                and displayed_trial_run != pending.trial_run_count
+            ):
+                _show_daily(pending.sample_record, "测试日志 · 不会保存")
+                if pending.last_trace is not None:
+                    _show_trace(pending.last_trace)
+                displayed_trial_run = pending.trial_run_count
+            if pending.step == "post_revision":
+                console.print(
+                    Panel(
+                        "当前画像和问题已经更新；上一次测试日志来自修改前的版本。\n"
+                        "你可以立即完成、继续修改，或用当前版本重新测试。",
+                        title="修改已应用",
+                    )
+                )
             console.print(
                 Panel(
-                    "请根据刚才的真实测试，决定是否调整画像、问题或日志表现。\n"
-                    "直接回车表示满意并完成首次调试。",
+                    "你可以放心继续调整，也可以接受当前结果立即结束。",
                     title="步骤 4/4 · 改进建议与确认",
                 )
             )
+            action = _prompt_menu(
+                "下一步",
+                (
+                    ("1", "满意，完成建档"),
+                    ("2", "继续修改画像、问题或日志方向"),
+                    ("3", "使用当前版本重新测试"),
+                ),
+                recommended="1",
+            )
+            if action is None:
+                console.print("进度已保存，下次运行相同命令会继续。")
+                return
+            if action == "1":
+                _finish_onboarding(pending, storage)
+                return
+            if action == "3":
+                pending = _save_onboarding(
+                    storage,
+                    pending,
+                    step="trial_input",
+                    sample_record=None,
+                    sample_project_suggestions=[],
+                    last_trace=None,
+                )
+                continue
             selection = _select_feedback()
             if selection is None:
-                console.print("进度已保存，下次运行 harvest 会继续。")
+                console.print("进度已保存，下次运行相同命令会继续。")
                 return
             categories, feedback = selection
             if not feedback:
-                _finish_onboarding(pending, storage)
-                return
-            if pending.revision_round >= 3:
-                console.print("[yellow]已达到三轮修改上限；请直接回车确认，或 q 暂停。[/yellow]")
                 continue
             old_questions = list(pending.proposed_questions)
-            revised, accepted = _revise_onboarding_design(
-                pending, categories, feedback, provider, storage
+            revised, outcome = _revise_onboarding_design(
+                pending,
+                categories,
+                feedback,
+                provider,
+                storage,
+                after_trial=True,
             )
-            if not accepted:
+            if outcome in {"failed", "discard"}:
                 pending = revised
                 continue
+            if outcome == "pause":
+                return
+            if outcome == "finish":
+                _finish_onboarding(revised, storage)
+                return
             new_ids = {item.id for item in revised.proposed_questions}
-            if pending.trial_run_count == 1:
+            if outcome == "retest" and pending.trial_run_count == 1:
                 kept_answers: dict[str, str] = {}
                 console.print("第一次修改后会重新询问全部测试问题。")
             else:
@@ -680,11 +980,12 @@ def _run_onboarding(
                     for key, value in pending.daily_answers.items()
                     if key in old_ids and key in new_ids
                 }
-                console.print("已保留 ID 未变化的问题答案，只询问新增问题。")
+                if outcome == "retest":
+                    console.print("已保留 ID 未变化的问题答案，只询问新增问题。")
             pending = _save_onboarding(
                 storage,
                 revised,
-                step="trial_input",
+                step="trial_input" if outcome == "retest" else "post_revision",
                 daily_answers=kept_answers,
                 sample_record=None,
                 sample_project_suggestions=[],
@@ -704,7 +1005,9 @@ def _review_daily(
     current = draft
     while True:
         _show_daily(current.record)
-        action = console.input("[bold][Enter] 保存 / 输入修改意见 / q 取消：[/bold]").strip()
+        action = console.input(
+            "[bold][Enter] 保存（推荐）/ 输入修改意见 / q 取消：[/bold]"
+        ).strip()
         if not action:
             return current
         if action.lower() in {"q", "quit", "取消"}:
@@ -712,7 +1015,8 @@ def _review_daily(
         if on_feedback is not None:
             on_feedback(action)
         try:
-            current = revise_daily(current, action, config, provider, active_projects, profile)
+            with _ai_status("正在根据你的意见修改日志"):
+                current = revise_daily(current, action, config, provider, active_projects, profile)
         except ProviderError as exc:
             console.print(f"[red]修订失败：{exc}[/red]")
 
@@ -723,13 +1027,16 @@ def _review_weekly(
     current = record
     while True:
         _show_weekly(current)
-        action = console.input("[bold][Enter] 保存 / 输入修改意见 / q 取消：[/bold]").strip()
+        action = console.input(
+            "[bold][Enter] 保存（推荐）/ 输入修改意见 / q 取消：[/bold]"
+        ).strip()
         if not action:
             return current
         if action.lower() in {"q", "quit", "取消"}:
             return None
         try:
-            current = revise_weekly(current, action, config, provider, profile)
+            with _ai_status("正在根据你的意见修改周报"):
+                current = revise_weekly(current, action, config, provider, profile)
         except ProviderError as exc:
             console.print(f"[red]修订失败：{exc}[/red]")
 
@@ -765,7 +1072,8 @@ def _process_pending(
     snapshot = _snapshot(config, storage, pending.date)
     try:
         provider = build_provider(config)
-        draft = generate_daily(pending, config, provider, snapshot.active_projects, profile)
+        with _ai_status("正在分析今天的回答并生成日志"):
+            draft = generate_daily(pending, config, provider, snapshot.active_projects, profile)
     except ProviderError as exc:
         storage.save_pending(pending.model_copy(update={"last_error": str(exc)}))
         console.print(f"[red]AI 处理失败：{exc}[/red]")
@@ -783,7 +1091,10 @@ def _process_pending(
         return None
     storage.save_daily(accepted.record, render_daily(accepted.record))
     storage.delete_pending(pending.date)
-    console.print(f"[green]日报已保存：{storage.daily_markdown_path(pending.date)}[/green]")
+    console.print(
+        f"[green]日报已保存：{storage.daily_markdown_path(pending.date)}[/green]\n"
+        f"如需修改：harvest revise {pending.date.isoformat()}"
+    )
     _confirm_project_updates(accepted.project_suggestions, pending.date, storage)
     _maybe_five_report_calibration(config, storage, provider)
     _maybe_weekly(pending.date, config, storage, provider, profile)
@@ -794,7 +1105,12 @@ def _proposal_confirm(before: ProfileContent, after: ProfileContent) -> bool:
     changes = profile_diff(before, after)
     console.print(Panel("\n".join(f"• {item}" for item in changes) or "画像内容没有变化", title="画像差异"))
     _show_profile(after, "拟议画像")
-    return typer.confirm("应用这份画像？", default=True)
+    choice = _prompt_menu(
+        "如何处理这份画像",
+        (("1", "应用并结束"), ("2", "不应用，保留当前画像")),
+        recommended="1",
+    )
+    return choice == "1"
 
 
 def _maybe_five_report_calibration(
@@ -829,7 +1145,8 @@ def _maybe_five_report_calibration(
         "revision_feedback": [item.model_dump(mode="json") for item in state.feedback_events],
     }
     try:
-        proposal = revise_profile_content(profile.content, feedback, provider, evidence=evidence)
+        with _ai_status("正在结合五份日志校准画像"):
+            proposal = revise_profile_content(profile.content, feedback, provider, evidence=evidence)
     except ProviderError as exc:
         console.print(f"[red]画像微调失败：{exc}[/red] 下次仍会询问。")
         return
@@ -850,7 +1167,8 @@ def _generate_week(
         console.print(f"[yellow]{week} 没有日报。[/yellow]")
         return None
     try:
-        draft = generate_weekly(week, records, config, provider, profile)
+        with _ai_status("正在整理本周体验与变化"):
+            draft = generate_weekly(week, records, config, provider, profile)
     except ProviderError as exc:
         console.print(f"[red]周报生成失败：{exc}[/red]")
         return None
@@ -918,9 +1236,15 @@ def settings() -> None:
     """修改 AI 服务商、数据目录和桌面提醒。"""
     current = load_config()
     console.print(Panel("配置和记录只保存在本机。API Key 只写入系统凭据库。", title="Harvest 设置"))
-    provider_name = typer.prompt("AI 服务商（deepseek/openai）", default=current.provider).strip().lower()
-    if provider_name not in {"deepseek", "openai"}:
-        raise typer.BadParameter("Provider 必须是 deepseek 或 openai")
+    provider_choice = _prompt_menu(
+        "选择 AI 服务商",
+        (("1", "DeepSeek"), ("2", "OpenAI")),
+        recommended="1",
+        default="1" if current.provider == "deepseek" else "2",
+    )
+    if provider_choice is None:
+        return
+    provider_name = {"1": "deepseek", "2": "openai"}[provider_choice]
     data_dir = Path(typer.prompt("数据目录", default=str(current.data_dir))).expanduser()
     reminder_time = typer.prompt("每日提醒时间", default=current.reminder_time).strip()
     if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", reminder_time):
@@ -986,13 +1310,87 @@ def profile_recalibrate() -> None:
     if not feedback:
         return
     try:
-        proposal = revise_profile_content(profile.content, feedback, _provider(config))
+        with _ai_status("正在根据反馈校准当前画像"):
+            proposal = revise_profile_content(profile.content, feedback, _provider(config))
     except ProviderError as exc:
         console.print(f"[red]画像校准失败：{exc}[/red]")
         raise typer.Exit(1) from exc
     if _proposal_confirm(profile.content, proposal.profile):
         storage.save_profile(next_profile(proposal.profile, profile, "manual"))
         console.print("[green]新画像已生效。[/green]")
+
+
+def _profile_question_models(profile: UserProfile) -> list[DailyQuestion]:
+    if profile.daily_questions:
+        return list(profile.daily_questions)
+    questions: list[DailyQuestion] = []
+    for key, prompt in build_questions(profile):
+        kind: Literal["core", "wellbeing", "tomorrow"] = "core"
+        if key == "basic_care":
+            kind = "wellbeing"
+        elif key == "tomorrow":
+            kind = "tomorrow"
+        questions.append(
+            DailyQuestion(id=key, prompt=prompt, purpose="帮助用户从当天经验中形成自我观察", kind=kind)
+        )
+    return questions
+
+
+@profile_app.command("rebuild")
+def profile_rebuild() -> None:
+    """重新建立用户画像并筛选每日问题；既有正式日志不会改变。"""
+    config, storage = _context()
+    profile = _require_profile(storage)
+    pending = storage.load_onboarding()
+    if pending is not None and pending.mode == "initial":
+        console.print("[yellow]存在尚未完成的首次建档，请先直接运行 harvest 完成或暂停它。[/yellow]")
+        return
+    if pending is None:
+        choice = _prompt_menu(
+            "重新建档方式",
+            (
+                ("1", "基于当前画像和问题集调整"),
+                ("2", "从头重新回答全部画像问题"),
+                ("3", "取消"),
+            ),
+            recommended="1",
+        )
+        if choice is None or choice == "3":
+            console.print("未开始重新建档，当前画像保持不变。")
+            return
+        if choice == "1":
+            pending = OnboardingPending(
+                date=date.today(),
+                created_at=datetime.now().astimezone(),
+                mode="rebuild",
+                start_strategy="current",
+                baseline_profile_version=profile.version,
+                step="profile_review",
+                proposed_profile=profile.content,
+                proposed_questions=_profile_question_models(profile),
+            )
+        else:
+            pending = OnboardingPending(
+                date=date.today(),
+                created_at=datetime.now().astimezone(),
+                mode="rebuild",
+                start_strategy="fresh",
+                baseline_profile_version=profile.version,
+            )
+        storage.save_onboarding(pending)
+    elif pending.baseline_profile_version != profile.version:
+        console.print("[red]当前画像已发生变化，旧的重建进度不能安全继续。[/red]")
+        return
+    key = get_api_key(config)
+    if key is not None:
+        provider = build_provider(config)
+    else:
+        console.print("[yellow]没有找到可用的 API Key，需要先重新验证服务商。[/yellow]")
+        configured = _configure_and_test_api()
+        if configured is None:
+            return
+        config, provider = configured
+    _run_onboarding(config, storage, provider)
 
 
 @profile_app.command("history")
@@ -1176,14 +1574,15 @@ def revise(
     snapshot = _snapshot(config, storage, target)
     _save_feedback(storage, target, correction)
     try:
-        draft = revise_daily(
-            DailyDraft(record=record, project_suggestions=[]),
-            correction,
-            config,
-            provider,
-            snapshot.active_projects,
-            profile,
-        )
+        with _ai_status("正在根据你的说明修改已保存日志"):
+            draft = revise_daily(
+                DailyDraft(record=record, project_suggestions=[]),
+                correction,
+                config,
+                provider,
+                snapshot.active_projects,
+                profile,
+            )
     except ProviderError as exc:
         console.print(f"[red]修订失败：{exc}[/red]")
         raise typer.Exit(1) from exc
@@ -1262,12 +1661,13 @@ def doctor(api_test: bool = typer.Option(False, "--api-test")) -> None:
             ]
         )
         if api_test:
-            result, _ = build_provider(config).generate(
-                instructions='只输出 {"status":"ok"}。',
-                input_text="连通性检查",
-                output_type=_Ping,
-                schema_name="connection_test",
-            )
+            with _ai_status("正在检查 API 连通性"):
+                result, _ = build_provider(config).generate(
+                    instructions='只输出 {"status":"ok"}。',
+                    input_text="连通性检查",
+                    output_type=_Ping,
+                    schema_name="connection_test",
+                )
             checks.append(("API 连通性", result.status == "ok", f"{config.provider}/{config.model}"))
     except (OSError, ValueError, ProviderError) as exc:
         checks.append(("运行检查", False, str(exc)))
