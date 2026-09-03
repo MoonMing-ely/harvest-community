@@ -2,6 +2,10 @@
 
 Harvest 是一个本地优先、可校准的个人复盘 CLI。用户 clone 后通过一个中文向导完成 API 配置、用户画像、个人问题集和真实联网测试，然后即可开始日常复盘。
 
+> [⬇️ 一键下载 Harvest 最新版（ZIP）](https://github.com/MoonMing-ely/harvest-community/archive/refs/heads/main.zip)
+>
+> 下载后解压。Linux/macOS 运行 `./run.sh`，Windows PowerShell 运行 `.\run.ps1`；需要 Python 3.11 或更高版本。
+
 ## 个性化流程
 
 1. 配置 AI 服务商与 API Key，并用最小真实请求检查网络和 JSON 格式。
@@ -14,16 +18,7 @@ AI 只总结可观察偏好。工作风格只能作为有依据、低或中置�
 
 ## 安装与首次使用
 
-发布页提供以下独立可执行文件：
-
-- Linux x86-64
-- Windows x86-64
-- macOS Intel
-- macOS Apple Silicon
-
-首轮测试版本没有代码签名或 macOS notarization。下载后先核对同名 `.sha256` 文件，再按系统提示允许执行。
-
-从源码 clone 后，Linux 或 macOS 运行 `./run.sh`，Windows PowerShell 运行 `.\run.ps1`。脚本会创建项目内虚拟环境、安装依赖并打开 Harvest；以后仍使用同一命令。
+可以点击上方链接下载 ZIP，也可以执行 `git clone https://github.com/MoonMing-ely/harvest-community.git`。Linux 或 macOS 运行 `./run.sh`，Windows PowerShell 运行 `.\run.ps1`。脚本会创建项目内虚拟环境、安装依赖并打开 Harvest；以后仍使用同一命令。
 
 朋友使用自己的 DeepSeek 或 OpenAI API Key。Key 保存到 Windows Credential Manager、macOS Keychain 或 Linux Secret Service；凭据库不可用时使用 `DEEPSEEK_API_KEY` 或 `OPENAI_API_KEY` 环境变量，程序不会为新用户降级写入明文 Key 文件。
 
