@@ -7,7 +7,10 @@ from datetime import date, datetime, timedelta
 from harvest.config import AppConfig
 from harvest.models import (
     DailyAnalysis,
+    DailyQuestion,
     DailyRecord,
+    NetworkTrace,
+    OnboardingProposal,
     PendingDaily,
     ProfileContent,
     ProfileProposal,
@@ -19,10 +22,13 @@ from harvest.models import (
 )
 from harvest.prompts import (
     DAILY_INSTRUCTIONS,
+    ONBOARDING_INSTRUCTIONS,
     PROFILE_INSTRUCTIONS,
     WEEKLY_INSTRUCTIONS,
     correction_input,
     daily_input,
+    onboarding_initial_input,
+    onboarding_revision_input,
     profile_initial_input,
     profile_revision_input,
     weekly_input,
@@ -53,7 +59,10 @@ class DailyDraft:
     project_suggestions: list[ProjectSuggestion]
 
 
-def build_questions(snapshot=None) -> tuple[tuple[str, str], ...]:
+def build_questions(profile: UserProfile | object | None = None) -> tuple[tuple[str, str], ...]:
+    # ContextSnapshot was accepted by v0.3 callers; keep it as a harmless legacy argument.
+    if isinstance(profile, UserProfile) and profile.daily_questions:
+        return tuple((item.id, item.prompt) for item in profile.daily_questions)
     return QUESTION_KEYS
 
 
@@ -84,6 +93,44 @@ def build_initial_profile(
         input_text=profile_initial_input(questionnaire, daily_answers),
         output_type=ProfileProposal,
         schema_name="harvest_profile_initial",
+    )
+    return proposal.model_copy(update={"profile": enforce_profile_boundaries(proposal.profile)})
+
+
+def build_initial_onboarding(
+    questionnaire: dict[str, str], provider: ResponsesProvider
+) -> OnboardingProposal:
+    proposal, _ = provider.generate(
+        instructions=ONBOARDING_INSTRUCTIONS,
+        input_text=onboarding_initial_input(questionnaire),
+        output_type=OnboardingProposal,
+        schema_name="harvest_onboarding_initial",
+    )
+    return proposal.model_copy(update={"profile": enforce_profile_boundaries(proposal.profile)})
+
+
+def revise_onboarding(
+    current: ProfileContent,
+    questions: list[DailyQuestion],
+    categories: list[str],
+    feedback: str,
+    provider: ResponsesProvider,
+    *,
+    trial_answers: dict[str, str] | None = None,
+    test_report=None,
+) -> OnboardingProposal:
+    proposal, _ = provider.generate(
+        instructions=ONBOARDING_INSTRUCTIONS,
+        input_text=onboarding_revision_input(
+            current,
+            questions,
+            categories,
+            feedback,
+            trial_answers=trial_answers,
+            test_report=test_report,
+        ),
+        output_type=OnboardingProposal,
+        schema_name="harvest_onboarding_revision",
     )
     return proposal.model_copy(update={"profile": enforce_profile_boundaries(proposal.profile)})
 
@@ -130,6 +177,37 @@ def generate_daily(
             report=analysis.report,
         ),
         project_suggestions=analysis.project_suggestions,
+    )
+
+
+def generate_trial_daily(
+    pending: PendingDaily,
+    config: AppConfig,
+    provider: ResponsesProvider,
+    profile: ProfileContent,
+    *,
+    now: datetime | None = None,
+) -> tuple[DailyDraft, NetworkTrace]:
+    analysis, usage, trace = provider.generate_traced(
+        instructions=DAILY_INSTRUCTIONS,
+        input_text=daily_input(pending.answers, [], profile),
+        output_type=DailyAnalysis,
+        schema_name="daily_harvest_test",
+    )
+    validate_daily_sections(analysis.report, profile)
+    return (
+        DailyDraft(
+            record=DailyRecord(
+                date=pending.date,
+                generated_at=now or datetime.now().astimezone(),
+                provider=config.provider,
+                model=config.model,
+                usage=usage,
+                report=analysis.report,
+            ),
+            project_suggestions=analysis.project_suggestions,
+        ),
+        trace,
     )
 
 

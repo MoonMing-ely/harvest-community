@@ -10,7 +10,7 @@ import httpx
 from pydantic import BaseModel, ValidationError
 
 from harvest.config import AppConfig, get_api_key
-from harvest.models import Usage
+from harvest.models import NetworkTrace, Usage
 
 
 T = TypeVar("T", bound=BaseModel)
@@ -48,6 +48,27 @@ class ResponsesProvider:
         self.retry_delays = retry_delays
 
     def generate(self, *, instructions: str, input_text: str, output_type: type[T], schema_name: str) -> tuple[T, Usage]:
+        value, usage, _ = self._generate(
+            instructions=instructions,
+            input_text=input_text,
+            output_type=output_type,
+            schema_name=schema_name,
+        )
+        return value, usage
+
+    def generate_traced(
+        self, *, instructions: str, input_text: str, output_type: type[T], schema_name: str
+    ) -> tuple[T, Usage, NetworkTrace]:
+        return self._generate(
+            instructions=instructions,
+            input_text=input_text,
+            output_type=output_type,
+            schema_name=schema_name,
+        )
+
+    def _generate(
+        self, *, instructions: str, input_text: str, output_type: type[T], schema_name: str
+    ) -> tuple[T, Usage, NetworkTrace]:
         schema = output_type.model_json_schema()
         format_config = {
             "type": "json_schema",
@@ -72,6 +93,7 @@ class ResponsesProvider:
             # max_output_tokens budget as the required JSON response.
             payload["reasoning"] = {"effort": "none"}
         last_error: Exception | None = None
+        started = time.monotonic()
         for attempt in range(len(self.retry_delays) + 1):
             try:
                 response = self.client.post(
@@ -85,6 +107,8 @@ class ResponsesProvider:
                     detail = _safe_error_detail(response, api_key=self.api_key)
                     raise ProviderError(f"模型请求失败（HTTP {response.status_code}）：{detail}")
                 body = response.json()
+                if not isinstance(body, dict):
+                    raise ProviderError("模型返回的响应不是 JSON 对象")
                 output_text = _extract_output_text(body)
                 value = _validate_structured_output(output_text, output_type)
                 usage_raw = body.get("usage") or {}
@@ -93,7 +117,18 @@ class ResponsesProvider:
                     output_tokens=usage_raw.get("output_tokens"),
                     total_tokens=usage_raw.get("total_tokens"),
                 )
-                return value, usage
+                trace = NetworkTrace(
+                    endpoint=self.endpoint,
+                    provider=self.provider,
+                    model=self.model,
+                    schema_name=schema_name,
+                    status_code=response.status_code,
+                    elapsed_ms=round((time.monotonic() - started) * 1000),
+                    request_payload=payload,
+                    response_payload=body,
+                    usage=usage,
+                )
+                return value, usage, trace
             except (httpx.TimeoutException, httpx.NetworkError, json.JSONDecodeError, ValidationError, ProviderError) as exc:
                 last_error = exc
                 retryable = isinstance(exc, (httpx.TimeoutException, httpx.NetworkError, json.JSONDecodeError, ValidationError))
@@ -112,7 +147,7 @@ class ResponsesProvider:
 def build_provider(config: AppConfig, *, client: httpx.Client | None = None) -> ResponsesProvider:
     api_key = get_api_key(config)
     if not api_key:
-        raise ProviderError(f"缺少 {config.api_key_name}；请先运行 harvest setup")
+        raise ProviderError(f"缺少 {config.api_key_name}；请直接运行 harvest 或使用 harvest auth")
     return ResponsesProvider(
         provider=config.provider,
         model=config.model,

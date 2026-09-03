@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from harvest.models import LEGACY_THEMES, ProfileContent, ThemeDefinition, UserProfile
+from harvest.models import DailyQuestion, LEGACY_THEMES, ProfileContent, ThemeDefinition, UserProfile
 
 
 ONBOARDING_QUESTIONS: tuple[tuple[str, str], ...] = (
@@ -67,7 +67,13 @@ def profile_diff(before: ProfileContent, after: ProfileContent) -> list[str]:
     return changes
 
 
-def next_profile(content: ProfileContent, previous: UserProfile | None, stage: str) -> UserProfile:
+def next_profile(
+    content: ProfileContent,
+    previous: UserProfile | None,
+    stage: str,
+    *,
+    daily_questions: list[DailyQuestion] | None = None,
+) -> UserProfile:
     now = datetime.now().astimezone()
     return UserProfile(
         version=1 if previous is None else previous.version + 1,
@@ -75,6 +81,11 @@ def next_profile(content: ProfileContent, previous: UserProfile | None, stage: s
         created_at=now if previous is None else previous.created_at,
         updated_at=now,
         content=enforce_profile_boundaries(content),
+        daily_questions=(
+            daily_questions
+            if daily_questions is not None
+            else (previous.daily_questions if previous is not None else [])
+        ),
     )
 
 

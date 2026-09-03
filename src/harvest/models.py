@@ -24,6 +24,13 @@ class TentativeObservation(StrictModel):
     confidence: Literal["low", "medium"] = "low"
 
 
+class DailyQuestion(StrictModel):
+    id: str = Field(pattern=r"^[a-z][a-z0-9_]{1,31}$")
+    prompt: str = Field(min_length=1, max_length=300)
+    purpose: str = Field(min_length=1, max_length=160)
+    kind: Literal["core", "wellbeing", "tomorrow"] = "core"
+
+
 class ProfileContent(StrictModel):
     current_context: str = Field(min_length=1, max_length=600)
     review_purposes: list[str] = Field(min_length=1, max_length=3)
@@ -46,17 +53,46 @@ class ProfileContent(StrictModel):
 
 
 class UserProfile(StrictModel):
-    schema_version: int = 1
+    schema_version: int = 2
     version: int = Field(ge=1)
     stage: Literal["initial", "revised", "five_report", "manual", "restored"]
     created_at: datetime
     updated_at: datetime
     content: ProfileContent
+    daily_questions: list[DailyQuestion] = Field(default_factory=list, max_length=7)
+
+    @model_validator(mode="after")
+    def valid_daily_questions(self) -> "UserProfile":
+        if not self.daily_questions:
+            return self
+        validate_daily_questions(self.daily_questions)
+        return self
 
 
 class ProfileProposal(StrictModel):
     profile: ProfileContent
     rationale: list[str] = Field(default_factory=list, max_length=6)
+
+
+class OnboardingProposal(StrictModel):
+    profile: ProfileContent
+    daily_questions: list[DailyQuestion] = Field(min_length=5, max_length=7)
+    rationale: list[str] = Field(default_factory=list, max_length=6)
+
+    @model_validator(mode="after")
+    def valid_daily_questions(self) -> "OnboardingProposal":
+        validate_daily_questions(self.daily_questions)
+        return self
+
+
+def validate_daily_questions(questions: list[DailyQuestion]) -> None:
+    ids = [item.id for item in questions]
+    if len(ids) != len(set(ids)):
+        raise ValueError("每日问题 ID 不能重复")
+    if not any(item.kind == "wellbeing" for item in questions):
+        raise ValueError("每日问题必须包含生活健康状态题")
+    if not any(item.kind == "tomorrow" for item in questions):
+        raise ValueError("每日问题必须包含明日衔接题")
 
 
 class ReportSection(StrictModel):
@@ -124,6 +160,18 @@ class Usage(StrictModel):
     input_tokens: int | None = Field(default=None, ge=0)
     output_tokens: int | None = Field(default=None, ge=0)
     total_tokens: int | None = Field(default=None, ge=0)
+
+
+class NetworkTrace(StrictModel):
+    endpoint: str
+    provider: str
+    model: str
+    schema_name: str
+    status_code: int
+    elapsed_ms: int = Field(ge=0)
+    request_payload: dict[str, Any]
+    response_payload: dict[str, Any]
+    usage: Usage
 
 
 class DailyRecord(StrictModel):
@@ -201,16 +249,21 @@ class PendingDaily(StrictModel):
 
 
 class OnboardingPending(StrictModel):
-    schema_version: int = 1
+    schema_version: int = 2
     date: date
     created_at: datetime
+    step: Literal["profile_inputs", "profile_review", "trial_input", "trial_review"] = "profile_inputs"
     questionnaire: dict[str, str] = Field(default_factory=dict)
     daily_answers: dict[str, str] = Field(default_factory=dict)
     proposed_profile: ProfileContent | None = None
+    proposed_questions: list[DailyQuestion] = Field(default_factory=list, max_length=7)
     sample_record: DailyRecord | None = None
     sample_project_suggestions: list[ProjectSuggestion] = Field(default_factory=list, max_length=2)
+    last_trace: NetworkTrace | None = None
+    trial_run_count: int = Field(default=0, ge=0)
     revision_round: int = Field(default=0, ge=0, le=3)
     feedback: list[str] = Field(default_factory=list, max_length=3)
+    feedback_categories: list[str] = Field(default_factory=list, max_length=4)
     last_error: str | None = None
 
 
@@ -222,6 +275,7 @@ class FeedbackEvent(StrictModel):
 
 class CalibrationState(StrictModel):
     schema_version: int = 1
+    onboarding_version: int = 1
     onboarding_completed: bool = False
     first_daily_date: date | None = None
     five_report_status: Literal["pending", "completed", "dismissed"] = "pending"

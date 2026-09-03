@@ -63,6 +63,32 @@ def test_provider_builds_responses_api_payload(provider_name, expected_url, expe
     assert usage.total_tokens == 168
 
 
+def test_provider_trace_contains_diagnostics_but_not_authorization() -> None:
+    client = httpx.Client(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json=_response_payload()))
+    )
+    provider = ResponsesProvider(
+        provider="deepseek",
+        model="test-model",
+        api_key="secret",
+        client=client,
+        retry_delays=(),
+    )
+
+    _, _, trace = provider.generate_traced(
+        instructions="system",
+        input_text="input",
+        output_type=DailyHarvest,
+        schema_name="daily_test",
+    )
+
+    serialized = trace.model_dump_json()
+    assert trace.status_code == 200
+    assert trace.schema_name == "daily_test"
+    assert "secret" not in serialized
+    assert "Authorization" not in serialized
+
+
 def test_provider_rejects_empty_output() -> None:
     client = httpx.Client(
         transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"output": [], "usage": {}}))
