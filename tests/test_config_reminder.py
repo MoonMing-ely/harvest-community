@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -27,7 +28,8 @@ def test_config_and_secret_round_trip(tmp_path, monkeypatch) -> None:
     save_api_key("OPENAI_API_KEY", "sk-test", secret_path)
     assert get_api_key(loaded, secret_path) == "sk-test"
     assert get_api_key_with_source(loaded, secret_path) == ("sk-test", "secrets_file")
-    assert secret_path.stat().st_mode & 0o777 == 0o600
+    if os.name != "nt":
+        assert secret_path.stat().st_mode & 0o777 == 0o600
 
 
 def test_config_strings_cannot_inject_toml_assignments(tmp_path) -> None:
@@ -94,4 +96,5 @@ def test_report_profile_is_created_private_and_readable(tmp_path) -> None:
     ensure_report_profile(path)
 
     assert "报告" in load_report_profile(path)
-    assert path.stat().st_mode & 0o777 == 0o600
+    if os.name != "nt":
+        assert path.stat().st_mode & 0o777 == 0o600

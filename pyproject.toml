@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "harvest-community"
-version = "0.5.1"
+version = "0.5.2"
 description = "A local-first, calibrated Daily Harvest and Weekly Review CLI."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -13,7 +13,7 @@ dependencies = [
   "keyring>=25.6,<27",
   "platformdirs>=4.3,<5",
   "secretstorage>=3.3,<4; sys_platform == 'linux'",
-  "pydantic>=2.11,<3",
+  "pydantic>=2.11,<2.13",
   "rich>=14,<15",
   "typer>=0.16,<1",
 ]
