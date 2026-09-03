@@ -135,7 +135,7 @@ def save_api_key(name: str, value: str, path: Path | None = None) -> None:
     if keyring is None:
         raise RuntimeError("系统凭据库不可用；请改用环境变量")
     try:
-        keyring.set_password("harvest", name, value.strip())
+        keyring.set_password(_keyring_service(), name, value.strip())
     except KeyringError as exc:
         raise RuntimeError("系统凭据库不可用；请改用环境变量") from exc
 
@@ -167,7 +167,7 @@ def get_api_key_with_source(config: AppConfig, path: Path | None = None) -> tupl
         return (file_value, "secrets_file") if file_value else (None, "missing")
     if keyring is not None:
         try:
-            stored = keyring.get_password("harvest", config.api_key_name)
+            stored = keyring.get_password(_keyring_service(), config.api_key_name)
         except KeyringError:
             stored = None
         if stored:
@@ -177,6 +177,11 @@ def get_api_key_with_source(config: AppConfig, path: Path | None = None) -> tupl
     if legacy:
         return legacy, "legacy_secrets_file"
     return None, "missing"
+
+
+def _keyring_service() -> str:
+    """Allow explicit test launchers to isolate credentials from normal Harvest installs."""
+    return os.environ.get("HARVEST_KEYRING_SERVICE", "harvest")
 
 
 def ensure_report_profile(path: Path = REPORT_PROFILE_PATH) -> Path:

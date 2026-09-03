@@ -1,6 +1,7 @@
 from typer.testing import CliRunner
 
 import harvest.cli as cli
+import harvest.config as config_module
 from harvest.config import AppConfig
 
 
@@ -28,3 +29,19 @@ def test_auth_saves_key_and_reports_provider(monkeypatch, tmp_path) -> None:
     assert "deepseek" in result.output
     assert "API Key" in result.output
     assert "已保存" in result.output
+
+
+def test_test_launcher_can_isolate_keyring_service(monkeypatch) -> None:
+    calls = []
+
+    class FakeKeyring:
+        @staticmethod
+        def set_password(service, name, value):
+            calls.append((service, name, value))
+
+    monkeypatch.setenv("HARVEST_KEYRING_SERVICE", "harvest-isolated-test")
+    monkeypatch.setattr(config_module, "keyring", FakeKeyring())
+
+    config_module.save_api_key("DEEPSEEK_API_KEY", "secret")
+
+    assert calls == [("harvest-isolated-test", "DEEPSEEK_API_KEY", "secret")]
