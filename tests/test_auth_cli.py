@@ -62,6 +62,16 @@ def test_first_run_can_use_key_in_memory_when_keyring_is_unavailable(monkeypatch
     assert key == "temporary-secret"
 
 
+def test_auth_rejects_key_with_embedded_whitespace(monkeypatch) -> None:
+    monkeypatch.setattr(cli, "load_config", lambda: AppConfig(provider="deepseek"))
+    monkeypatch.setattr(cli.getpass, "getpass", lambda prompt: "secret value")
+
+    result = runner.invoke(cli.app, ["auth"])
+
+    assert result.exit_code == 1
+    assert "API Key 格式无效" in result.output
+
+
 def test_ai_status_uses_animated_dots_and_explains_wait(monkeypatch) -> None:
     captured = {}
 

@@ -19,6 +19,7 @@ from harvest.models import (
     UserProfile,
     WeeklyRecord,
 )
+from harvest.text_safety import sanitize_untrusted_text
 
 
 T = TypeVar("T", bound=BaseModel)
@@ -40,6 +41,7 @@ class Storage:
         ):
             path.mkdir(parents=True, exist_ok=True)
             path.chmod(0o700)
+        self._migrate_terminal_safe_markdown()
 
     def daily_json_path(self, target: date) -> Path:
         return self.root / "daily" / f"{target:%Y}" / f"{target:%m}" / f"{target.isoformat()}.json"
@@ -161,8 +163,21 @@ class Storage:
         return records
 
     def _write_model(self, path: Path, model: BaseModel) -> None:
-        body = json.dumps(model.model_dump(mode="json"), ensure_ascii=False, indent=2) + "\n"
+        validated = type(model).model_validate(model.model_dump(mode="python"))
+        body = json.dumps(validated.model_dump(mode="json"), ensure_ascii=False, indent=2) + "\n"
         self._atomic_write(path, body)
+
+    def _migrate_terminal_safe_markdown(self) -> None:
+        state = self.load_calibration()
+        if state.terminal_safety_version >= 1:
+            return
+        for pattern in ("daily/*/*/*.md", "weekly/*/*.md"):
+            for path in self.root.glob(pattern):
+                original = path.read_text(encoding="utf-8")
+                safe = sanitize_untrusted_text(original)
+                if safe != original:
+                    self._atomic_write(path, safe)
+        self.save_calibration(state.model_copy(update={"terminal_safety_version": 1}))
 
     def _load_model(self, path: Path, model_type: type[T]) -> T | None:
         if not path.exists():

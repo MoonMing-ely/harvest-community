@@ -23,6 +23,7 @@ from pydantic import BaseModel, ConfigDict
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.text import Text
 
 from harvest.config import (
     CONFIG_PATH,
@@ -71,6 +72,7 @@ from harvest.service import (
     week_bounds,
 )
 from harvest.storage import Storage
+from harvest.text_safety import sanitize_untrusted_data, sanitize_untrusted_text
 
 
 app = ChineseTyper(
@@ -82,7 +84,11 @@ project_app = ChineseTyper(help="维护跨天项目记忆。", no_args_is_help=T
 profile_app = ChineseTyper(help="查看、校准、重建和恢复用户画像。", invoke_without_command=True)
 app.add_typer(project_app, name="project")
 app.add_typer(profile_app, name="profile")
-console = Console()
+console = Console(markup=False)
+
+
+def _terminal(value: object) -> str:
+    return sanitize_untrusted_text(str(value))
 
 
 GUIDED_PROFILE_CHOICES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
@@ -138,8 +144,10 @@ class _ConnectionCheck(BaseModel):
 
 @contextmanager
 def _ai_status(message: str):
+    status = Text(f"{_terminal(message)}…", style="cyan")
+    status.append(" 可能需要几十秒；可按 Ctrl+C 暂停", style="dim")
     with console.status(
-        f"[cyan]{message}…[/cyan] [dim]可能需要几十秒；可按 Ctrl+C 暂停[/dim]",
+        status,
         spinner="dots",
     ):
         yield
@@ -169,7 +177,7 @@ def _prompt_menu(
             return None
         if raw in valid:
             return raw
-        console.print(f"[yellow]无法识别“{raw}”。请输入 {expected}，或输入 q 暂停。[/yellow]")
+        console.print(f"无法识别“{_terminal(raw)}”。请输入 {expected}，或输入 q 暂停。", style="yellow")
 
 
 def _parse_date(value: str | None) -> date:
@@ -185,7 +193,7 @@ def _context() -> tuple[AppConfig, Storage]:
     try:
         config = load_config()
     except (OSError, ValueError) as exc:
-        console.print(f"[red]配置读取失败：{exc}[/red]")
+        console.print(f"配置读取失败：{_terminal(exc)}", style="red")
         raise typer.Exit(1) from exc
     storage = Storage(config.data_dir)
     storage.ensure()
@@ -196,7 +204,7 @@ def _provider(config: AppConfig) -> ResponsesProvider:
     try:
         return build_provider(config)
     except ProviderError as exc:
-        console.print(f"[red]{exc}[/red]")
+        console.print(_terminal(exc), style="red")
         raise typer.Exit(1) from exc
 
 
@@ -207,60 +215,68 @@ def _snapshot(config: AppConfig, storage: Storage, target: date) -> ContextSnaps
 def _require_profile(storage: Storage) -> UserProfile:
     profile = storage.load_profile()
     if profile is None:
-        console.print("[yellow]尚未建立用户画像，请直接运行 harvest 完成首次向导。[/yellow]")
+        console.print("尚未建立用户画像，请直接运行 harvest 完成首次向导。", style="yellow")
         raise typer.Exit(1)
     return profile
 
 
 def _show_daily(record: DailyRecord, title: str = "日报预览") -> None:
-    console.print(Panel(Markdown(render_daily(record)), border_style="green", title=title))
+    console.print(Panel(Markdown(render_daily(record), hyperlinks=False), border_style="green", title=_terminal(title)))
 
 
 def _show_weekly(record: WeeklyRecord) -> None:
-    console.print(Panel(Markdown(render_weekly(record)), border_style="cyan", title="周报预览"))
+    console.print(Panel(Markdown(render_weekly(record), hyperlinks=False), border_style="cyan", title="周报预览"))
 
 
 def _show_profile(profile: UserProfile | ProfileContent, title: str = "用户画像") -> None:
     content = profile.content if isinstance(profile, UserProfile) else profile
-    console.print(Panel(Markdown(render_profile(content)), title=title, border_style="cyan"))
+    console.print(Panel(Markdown(render_profile(content), hyperlinks=False), title=_terminal(title), border_style="cyan"))
 
 
 def _show_context_snapshot(snapshot: ContextSnapshot) -> None:
     lines: list[str] = []
     if snapshot.active_projects:
-        lines.append("[bold]进行中的项目[/bold]")
+        lines.append("进行中的项目")
         for item in snapshot.active_projects:
             next_step = f" → {item.next_step}" if item.next_step else ""
             lines.append(f"• {item.name}{next_step}")
     if snapshot.recent_progress:
-        lines.append("[bold]最近进展[/bold]")
+        lines.append("最近进展")
         lines.extend(f"• {item}" for item in snapshot.recent_progress)
     if snapshot.last_core_target:
-        lines.append(f"[bold]上一份核心目标[/bold]\n• {snapshot.last_core_target}")
+        lines.append(f"上一份核心目标\n• {_terminal(snapshot.last_core_target)}")
     if snapshot.current_state_hints:
-        lines.append("[bold]可选本地状态提示[/bold]")
+        lines.append("可选本地状态提示")
         lines.extend(f"• {item}" for item in snapshot.current_state_hints)
     console.print(Panel("\n".join(lines) if lines else "暂无近期记忆。", title="近期记忆 · 仅本地"))
 
 
 def _prompt_api_key(config: AppConfig, *, allow_session_only: bool = False) -> str | None:
-    console.print(f"当前 AI 服务商：[bold]{config.provider}[/bold]；模型：[bold]{config.model}[/bold]")
+    line = Text("当前 AI 服务商：")
+    line.append(_terminal(config.provider), style="bold")
+    line.append("；模型：")
+    line.append(_terminal(config.model), style="bold")
+    console.print(line)
     key = getpass.getpass(f"{config.api_key_name}（输入不会显示）: ").strip()
     if not key:
-        console.print("[yellow]输入为空，未保存。[/yellow]")
+        console.print("输入为空，未保存。", style="yellow")
         return None
     try:
         save_api_key(config.api_key_name, key)
+    except ValueError as exc:
+        console.print(_terminal(exc), style="red")
+        return None
     except RuntimeError as exc:
         if not allow_session_only:
-            console.print(f"[red]{exc}[/red]")
+            console.print(_terminal(exc), style="red")
             return None
         console.print(
-            "[yellow]系统凭据库不可用：Key 仅在本次运行的内存中临时使用，"
-            "不会写入文件，退出后需要重新输入。也可改用环境变量。[/yellow]"
+            "系统凭据库不可用：Key 仅在本次运行的内存中临时使用，"
+            "不会写入文件，退出后需要重新输入。也可改用环境变量。",
+            style="yellow",
         )
         return key
-    console.print("[green]API Key 已保存到系统凭据库。[/green]")
+    console.print("API Key 已保存到系统凭据库。", style="green")
     return key
 
 
@@ -277,10 +293,12 @@ def _collect_answers(
             continue
         while True:
             try:
-                current[key] = typer.prompt(question, default="", show_default=False).strip()
+                current[key] = sanitize_untrusted_text(
+                    typer.prompt(question, default="", show_default=False).strip()
+                )
                 break
             except UnicodeDecodeError:
-                console.print("[yellow]当前行不是有效 UTF-8，已丢弃；此前答案仍已保存。[/yellow]")
+                console.print("当前行不是有效 UTF-8，已丢弃；此前答案仍已保存。", style="yellow")
         on_change(current)
     return current
 
@@ -293,11 +311,11 @@ def _prompt_guided_choice(prompt: str, options: tuple[str, ...]) -> str | None:
     lines = [f"{index}. {item}" for index, item in enumerate(options, start=1)]
     console.print(Panel("\n".join(lines), title=prompt))
     while True:
-        raw = typer.prompt(
+        raw = sanitize_untrusted_text(typer.prompt(
             "可输入一个或多个编号（逗号分隔），也可直接填写自己的答案；回车跳过，q 暂停",
             default="",
             show_default=False,
-        )
+        ))
         if _is_pause(raw):
             return None
         selected: list[str] = []
@@ -318,8 +336,9 @@ def _prompt_guided_choice(prompt: str, options: tuple[str, ...]) -> str | None:
                 selected.append(value)
         if invalid_numbers:
             console.print(
-                f"[yellow]编号 {'、'.join(invalid_numbers)} 不存在；请输入 1～{len(options)}，"
-                "或直接填写文字。[/yellow]"
+                f"编号 {'、'.join(invalid_numbers)} 不存在；请输入 1～{len(options)}，"
+                "或直接填写文字。",
+                style="yellow",
             )
             continue
         return "、".join(selected)
@@ -340,9 +359,9 @@ def _collect_guided_profile(pending: OnboardingPending, storage: Storage) -> Onb
         storage.save_onboarding(current)
     learning_key, learning_prompt = LEARNING_HABIT_QUESTION
     if learning_key not in current.questionnaire:
-        answer = typer.prompt(
+        answer = sanitize_untrusted_text(typer.prompt(
             learning_prompt + "（可回车跳过，输入 q 暂停）", default="", show_default=False
-        ).strip()
+        ).strip())
         if _is_pause(answer):
             storage.save_onboarding(current)
             return None
@@ -363,7 +382,7 @@ def _show_answer_summary(
     items: tuple[tuple[str, str], ...], answers: dict[str, str], title: str
 ) -> None:
     lines = [
-        f"{index}. {prompt}\n   [dim]{answers.get(key) or '（已跳过）'}[/dim]"
+        f"{index}. {_terminal(prompt)}\n   {_terminal(answers.get(key) or '（已跳过）')}"
         for index, (key, prompt) in enumerate(items, start=1)
     ]
     console.print(Panel("\n".join(lines), title=title))
@@ -387,7 +406,7 @@ def _review_profile_answers(
         if not action:
             return current
         if not action.isdigit() or not 1 <= int(action) <= len(items):
-            console.print(f"[yellow]无法识别。请输入 1～{len(items)}，回车确认，或 q 暂停。[/yellow]")
+            console.print(f"无法识别。请输入 1～{len(items)}，回车确认，或 q 暂停。", style="yellow")
             continue
         index = int(action) - 1
         key, prompt = items[index]
@@ -395,9 +414,9 @@ def _review_profile_answers(
         if guided is not None:
             answer = _prompt_guided_choice(prompt, guided[2])
         else:
-            answer = typer.prompt(
+            answer = sanitize_untrusted_text(typer.prompt(
                 prompt + "（可回车跳过，输入 q 暂停）", default="", show_default=False
-            ).strip()
+            ).strip())
             if _is_pause(answer):
                 storage.save_onboarding(current)
                 return None
@@ -429,10 +448,12 @@ def _review_trial_answers(
         if not action:
             return current
         if not action.isdigit() or not 1 <= int(action) <= len(items):
-            console.print(f"[yellow]无法识别。请输入 1～{len(items)}，回车确认，或 q 暂停。[/yellow]")
+            console.print(f"无法识别。请输入 1～{len(items)}，回车确认，或 q 暂停。", style="yellow")
             continue
         key, prompt = items[int(action) - 1]
-        answer = typer.prompt(prompt + "（可回车跳过）", default="", show_default=False).strip()
+        answer = sanitize_untrusted_text(
+            typer.prompt(prompt + "（可回车跳过）", default="", show_default=False).strip()
+        )
         current = _save_onboarding(
             storage,
             current,
@@ -495,12 +516,12 @@ def _select_feedback() -> tuple[list[str], str] | None:
             return [], ""
         tokens = [token.strip() for token in re.split(r"[,，、]", raw) if token.strip()]
         if not tokens or any(token not in FEEDBACK_CATEGORIES for token in tokens):
-            console.print("[yellow]无法识别。请输入 1～4，可用逗号多选；输入 0 返回。[/yellow]")
+            console.print("无法识别。请输入 1～4，可用逗号多选；输入 0 返回。", style="yellow")
             continue
         categories = list(dict.fromkeys(FEEDBACK_CATEGORIES[token] for token in tokens))
         feedback = typer.prompt("请具体说明希望怎样改进（这里可以输入文字）").strip()
         if not feedback:
-            console.print("[yellow]改进内容不能为空；如果暂时不修改，请输入 q 暂停。[/yellow]")
+            console.print("改进内容不能为空；如果暂时不修改，请输入 q 暂停。", style="yellow")
             continue
         return categories, feedback
 
@@ -520,15 +541,16 @@ def _show_trace_summary(trace: NetworkTrace | NetworkTraceSummary) -> None:
 
 def _show_trace_details(trace: NetworkTrace) -> None:
     console.print(
-        "[yellow]注意：以下技术详情可能包含你输入的个人内容和模型生成结果，"
-        "请勿直接公开分享。API Key 和 Authorization 不会显示。[/yellow]"
+        "注意：以下技术详情可能包含你输入的个人内容和模型生成结果，"
+        "请勿直接公开分享。API Key 和 Authorization 不会显示。",
+        style="yellow",
     )
-    detail = {
+    detail = sanitize_untrusted_data({
         "endpoint": trace.endpoint,
         "request": trace.request_payload,
         "response": trace.response_payload,
-    }
-    console.print(Panel(json.dumps(detail, ensure_ascii=False, indent=2), title="技术详情"))
+    })
+    console.print(Panel(Text(json.dumps(detail, ensure_ascii=False, indent=2)), title="技术详情"))
 
 
 def _configure_and_test_api() -> tuple[AppConfig, ResponsesProvider] | None:
@@ -536,7 +558,7 @@ def _configure_and_test_api() -> tuple[AppConfig, ResponsesProvider] | None:
     console.print(Panel("第一步只配置 AI 服务商与 API Key。测试会发送一次最小真实请求。", title="步骤 1/4 · API 配置"))
     session_api_key: str | None = None
     while True:
-        console.print("[dim]这里选择服务商，下一步才输入 API Key。请优先选择你已有 Key 的服务商。[/dim]")
+        console.print("这里选择服务商，下一步才输入 API Key。请优先选择你已有 Key 的服务商。", style="dim")
         provider_choice = _prompt_menu(
             "选择 AI 服务商",
             (("1", "DeepSeek"), ("2", "OpenAI")),
@@ -573,7 +595,7 @@ def _configure_and_test_api() -> tuple[AppConfig, ResponsesProvider] | None:
                     schema_name="harvest_connection_check",
                 )
         except ProviderError as exc:
-            console.print(f"[red]API 验证失败：{exc}[/red]")
+            console.print(f"API 验证失败：{_terminal(exc)}", style="red")
             action = _prompt_menu(
                 "API 验证失败，下一步",
                 (("1", "重试"), ("2", "更换 API Key"), ("3", "更换服务商")),
@@ -589,7 +611,7 @@ def _configure_and_test_api() -> tuple[AppConfig, ResponsesProvider] | None:
                 continue
             current = config
             continue
-        console.print("[green]✓ API Key、网络与结构化响应均可用。[/green]")
+        console.print("✓ API Key、网络与结构化响应均可用。", style="green")
         _show_trace_summary(trace)
         return config, provider
 
@@ -623,7 +645,7 @@ def _revise_onboarding_design(
                 test_report=pending.sample_record.report if pending.sample_record else None,
             )
     except ProviderError as exc:
-        console.print(f"[red]修改失败：{exc}[/red]")
+        console.print(f"修改失败：{_terminal(exc)}", style="red")
         return _save_onboarding(storage, pending, last_error=str(exc)), "failed"
     _show_design_diff(
         pending.proposed_profile,
@@ -710,7 +732,7 @@ def _run_trial(
             )
     except ProviderError as exc:
         pending = _save_onboarding(storage, pending, last_error=str(exc))
-        console.print(f"[red]测试失败：{exc}[/red]")
+        console.print(f"测试失败：{_terminal(exc)}", style="red")
         action = console.input("[Enter] 稍后重试 / q 暂停：").strip()
         return None if _is_pause(action) else pending
     pending = _save_onboarding(
@@ -746,7 +768,7 @@ def _finish_onboarding(pending: OnboardingPending, storage: Storage) -> None:
     if pending.mode == "rebuild" and (
         previous is None or previous.version != pending.baseline_profile_version
     ):
-        console.print("[red]当前画像已在重建期间发生变化。为避免覆盖，请重新运行重建命令。[/red]")
+        console.print("当前画像已在重建期间发生变化。为避免覆盖，请重新运行重建命令。", style="red")
         return
     profile = next_profile(
         pending.proposed_profile,
@@ -818,7 +840,7 @@ def _run_onboarding(
                     proposal = build_initial_onboarding(pending.questionnaire, provider)
             except ProviderError as exc:
                 _save_onboarding(storage, pending, last_error=str(exc))
-                console.print(f"[red]画像与问题生成失败：{exc}[/red]")
+                console.print(f"画像与问题生成失败：{_terminal(exc)}", style="red")
                 return
             pending = _save_onboarding(
                 storage,
@@ -835,7 +857,7 @@ def _run_onboarding(
                 continue
             _show_profile(pending.proposed_profile, "画像草案")
             _show_questions(pending.proposed_questions, "个人每日问题草案")
-            console.print(f"[dim]已应用修改次数：{pending.revision_round}[/dim]")
+            console.print(f"已应用修改次数：{pending.revision_round}", style="dim")
             action = _prompt_menu(
                 "检查当前画像与问题",
                 (
@@ -1009,7 +1031,7 @@ def _review_daily(
     while True:
         _show_daily(current.record)
         action = console.input(
-            "[bold][Enter] 保存（推荐）/ 输入修改意见 / q 取消：[/bold]"
+            Text("[Enter] 保存（推荐）/ 输入修改意见 / q 取消：", style="bold")
         ).strip()
         if not action:
             return current
@@ -1021,7 +1043,7 @@ def _review_daily(
             with _ai_status("正在根据你的意见修改日志"):
                 current = revise_daily(current, action, config, provider, active_projects, profile)
         except ProviderError as exc:
-            console.print(f"[red]修订失败：{exc}[/red]")
+            console.print(f"修订失败：{_terminal(exc)}", style="red")
 
 
 def _review_weekly(
@@ -1031,7 +1053,7 @@ def _review_weekly(
     while True:
         _show_weekly(current)
         action = console.input(
-            "[bold][Enter] 保存（推荐）/ 输入修改意见 / q 取消：[/bold]"
+            Text("[Enter] 保存（推荐）/ 输入修改意见 / q 取消：", style="bold")
         ).strip()
         if not action:
             return current
@@ -1041,7 +1063,7 @@ def _review_weekly(
             with _ai_status("正在根据你的意见修改周报"):
                 current = revise_weekly(current, action, config, provider, profile)
         except ProviderError as exc:
-            console.print(f"[red]修订失败：{exc}[/red]")
+            console.print(f"修订失败：{_terminal(exc)}", style="red")
 
 
 def _confirm_project_updates(
@@ -1055,13 +1077,13 @@ def _confirm_project_updates(
         for item in suggestions
     ]
     console.print(Panel("\n".join(lines), title="AI 建议更新项目记忆"))
-    if not typer.confirm("应用以上更新？", default=True):
+    if not typer.confirm("应用以上更新？", default=False):
         return
     updated, applied, skipped = apply_suggestions(storage.load_project_memory(), suggestions, target)
     if applied:
         storage.save_project_memory(updated)
     for item in skipped:
-        console.print(f"[yellow]跳过：{item}[/yellow]")
+        console.print(f"跳过：{_terminal(item)}", style="yellow")
 
 
 def _save_feedback(storage: Storage, target: date, text: str) -> None:
@@ -1079,7 +1101,7 @@ def _process_pending(
             draft = generate_daily(pending, config, provider, snapshot.active_projects, profile)
     except ProviderError as exc:
         storage.save_pending(pending.model_copy(update={"last_error": str(exc)}))
-        console.print(f"[red]AI 处理失败：{exc}[/red]")
+        console.print(f"AI 处理失败：{_terminal(exc)}", style="red")
         return None
     accepted = _review_daily(
         draft,
@@ -1094,10 +1116,9 @@ def _process_pending(
         return None
     storage.save_daily(accepted.record, render_daily(accepted.record))
     storage.delete_pending(pending.date)
-    console.print(
-        f"[green]日报已保存：{storage.daily_markdown_path(pending.date)}[/green]\n"
-        f"如需修改：harvest revise {pending.date.isoformat()}"
-    )
+    saved = Text(f"日报已保存：{_terminal(storage.daily_markdown_path(pending.date))}", style="green")
+    saved.append(f"\n如需修改：harvest revise {pending.date.isoformat()}")
+    console.print(saved)
     _confirm_project_updates(accepted.project_suggestions, pending.date, storage)
     _maybe_five_report_calibration(config, storage, provider)
     _maybe_weekly(pending.date, config, storage, provider, profile)
@@ -1151,7 +1172,7 @@ def _maybe_five_report_calibration(
         with _ai_status("正在结合五份日志校准画像"):
             proposal = revise_profile_content(profile.content, feedback, provider, evidence=evidence)
     except ProviderError as exc:
-        console.print(f"[red]画像微调失败：{exc}[/red] 下次仍会询问。")
+        console.print(f"画像微调失败：{_terminal(exc)} 下次仍会询问。", style="red")
         return
     if not _proposal_confirm(profile.content, proposal.profile):
         return
@@ -1159,7 +1180,7 @@ def _maybe_five_report_calibration(
     storage.save_calibration(
         state.model_copy(update={"five_report_status": "completed", "feedback_events": []})
     )
-    console.print("[green]五日报告微调已生效，将从下一份日报开始使用。[/green]")
+    console.print("五日报告微调已生效，将从下一份日报开始使用。", style="green")
 
 
 def _generate_week(
@@ -1167,19 +1188,19 @@ def _generate_week(
 ) -> WeeklyRecord | None:
     records = storage.daily_records(*week_bounds(week))
     if not records:
-        console.print(f"[yellow]{week} 没有日报。[/yellow]")
+        console.print(f"{_terminal(week)} 没有日报。", style="yellow")
         return None
     try:
         with _ai_status("正在整理本周体验与变化"):
             draft = generate_weekly(week, records, config, provider, profile)
     except ProviderError as exc:
-        console.print(f"[red]周报生成失败：{exc}[/red]")
+        console.print(f"周报生成失败：{_terminal(exc)}", style="red")
         return None
     accepted = _review_weekly(draft, config, provider, profile)
     if accepted is None:
         return None
     storage.save_weekly(accepted, render_weekly(accepted))
-    console.print(f"[green]周报已保存：{storage.weekly_markdown_path(week)}[/green]")
+    console.print(f"周报已保存：{_terminal(storage.weekly_markdown_path(week))}", style="green")
     return accepted
 
 
@@ -1199,11 +1220,11 @@ def _maybe_weekly(
 def _start_or_resume_onboarding() -> None:
     config, storage = _context()
     if storage.load_profile() is not None:
-        console.print("[yellow]用户画像已经存在；可直接运行 harvest 开始正式复盘。[/yellow]")
+        console.print("用户画像已经存在；可直接运行 harvest 开始正式复盘。", style="yellow")
         return
     pending = storage.load_onboarding()
     if pending is not None and get_api_key(config) is not None:
-        console.print(f"[cyan]继续上次保存的首次调试：{pending.step}[/cyan]")
+        console.print(f"继续上次保存的首次调试：{_terminal(pending.step)}", style="cyan")
         _run_onboarding(config, storage, _provider(config))
         return
     configured = _configure_and_test_api()
@@ -1268,12 +1289,15 @@ def settings() -> None:
     if typer.confirm("安装每日桌面提醒？", default=True):
         try:
             install_reminder(reminder_time)
-            console.print(f"[green]提醒已启用：每天 {reminder_time}[/green]")
+            console.print(f"提醒已启用：每天 {_terminal(reminder_time)}", style="green")
         except (OSError, subprocess.SubprocessError) as exc:
-            console.print(f"[yellow]提醒安装失败，但不影响日报：{exc}[/yellow]")
-    console.print(f"[green]配置已保存：{CONFIG_PATH}[/green]")
+            console.print(f"提醒安装失败，但不影响日报：{_terminal(exc)}", style="yellow")
+    console.print(f"配置已保存：{_terminal(CONFIG_PATH)}", style="green")
     if Storage(data_dir).load_profile() is None:
-        console.print("下一步直接运行 [bold]harvest[/bold] 完成首次调试。")
+        line = Text("下一步直接运行 ")
+        line.append("harvest", style="bold")
+        line.append(" 完成首次调试。")
+        console.print(line)
 
 
 @app.command()
@@ -1290,7 +1314,7 @@ def auth() -> None:
 def onboard(target_date: str | None = typer.Option(None, "--date", help="首份日报日期")) -> None:
     """兼容旧命令：启动或继续首次调试。"""
     if target_date is not None:
-        console.print("[yellow]--date 已忽略：首次测试不会创建正式日报。[/yellow]")
+        console.print("--date 已忽略：首次测试不会创建正式日报。", style="yellow")
     _start_or_resume_onboarding()
 
 
@@ -1316,11 +1340,11 @@ def profile_recalibrate() -> None:
         with _ai_status("正在根据反馈校准当前画像"):
             proposal = revise_profile_content(profile.content, feedback, _provider(config))
     except ProviderError as exc:
-        console.print(f"[red]画像校准失败：{exc}[/red]")
+        console.print(f"画像校准失败：{_terminal(exc)}", style="red")
         raise typer.Exit(1) from exc
     if _proposal_confirm(profile.content, proposal.profile):
         storage.save_profile(next_profile(proposal.profile, profile, "manual"))
-        console.print("[green]新画像已生效。[/green]")
+        console.print("新画像已生效。", style="green")
 
 
 def _profile_question_models(profile: UserProfile) -> list[DailyQuestion]:
@@ -1346,7 +1370,7 @@ def profile_rebuild() -> None:
     profile = _require_profile(storage)
     pending = storage.load_onboarding()
     if pending is not None and pending.mode == "initial":
-        console.print("[yellow]存在尚未完成的首次建档，请先直接运行 harvest 完成或暂停它。[/yellow]")
+        console.print("存在尚未完成的首次建档，请先直接运行 harvest 完成或暂停它。", style="yellow")
         return
     if pending is None:
         choice = _prompt_menu(
@@ -1382,13 +1406,13 @@ def profile_rebuild() -> None:
             )
         storage.save_onboarding(pending)
     elif pending.baseline_profile_version != profile.version:
-        console.print("[red]当前画像已发生变化，旧的重建进度不能安全继续。[/red]")
+        console.print("当前画像已发生变化，旧的重建进度不能安全继续。", style="red")
         return
     key = get_api_key(config)
     if key is not None:
         provider = build_provider(config)
     else:
-        console.print("[yellow]没有找到可用的 API Key，需要先重新验证服务商。[/yellow]")
+        console.print("没有找到可用的 API Key，需要先重新验证服务商。", style="yellow")
         configured = _configure_and_test_api()
         if configured is None:
             return
@@ -1411,11 +1435,11 @@ def profile_restore(version: int = typer.Argument(..., min=1)) -> None:
     current = _require_profile(storage)
     selected = storage.load_profile_version(version)
     if selected is None:
-        console.print(f"[red]不存在画像版本 v{version}。[/red]")
+        console.print(f"不存在画像版本 v{version}。", style="red")
         raise typer.Exit(1)
     if _proposal_confirm(current.content, selected.content):
         storage.save_profile(next_profile(selected.content, current, "restored"))
-        console.print("[green]历史画像已恢复为新的当前版本。[/green]")
+        console.print("历史画像已恢复为新的当前版本。", style="green")
 
 
 @profile_app.command("import-legacy")
@@ -1425,10 +1449,10 @@ def profile_import_legacy(
     """显式导入旧版 Markdown 画像；不会自动读取个人文件。"""
     _, storage = _context()
     if storage.load_profile() is not None:
-        console.print("[red]当前数据目录已经存在结构化画像。[/red]")
+        console.print("当前数据目录已经存在结构化画像。", style="red")
         raise typer.Exit(1)
     if not path.exists():
-        console.print(f"[red]文件不存在：{path}[/red]")
+        console.print(f"文件不存在：{_terminal(path)}", style="red")
         raise typer.Exit(1)
     content = legacy_profile_content(path.read_text(encoding="utf-8"))
     profile = next_profile(content, None, "initial")
@@ -1436,7 +1460,7 @@ def profile_import_legacy(
     if typer.confirm("确认导入？", default=True):
         storage.save_profile(profile)
         storage.save_calibration(CalibrationState(onboarding_completed=True))
-        console.print("[green]旧版画像已导入；原文件未修改。[/green]")
+        console.print("旧版画像已导入；原文件未修改。", style="green")
 
 
 @project_app.command("list")
@@ -1448,7 +1472,10 @@ def project_list(show_all: bool = typer.Option(False, "--all")) -> None:
         projects = [item for item in projects if item.status == "active"]
     for item in sorted(projects, key=lambda value: (value.status, value.name.casefold())):
         suffix = f" · next: {item.next_step}" if item.next_step else ""
-        console.print(f"• [bold]{item.name}[/bold] · {item.status}{suffix}")
+        line = Text("• ")
+        line.append(_terminal(item.name), style="bold")
+        line.append(f" · {_terminal(item.status)}{_terminal(suffix)}")
+        console.print(line)
 
 
 @project_app.command("add")
@@ -1519,7 +1546,7 @@ def daily(target_date: str | None = typer.Option(None, "--date")) -> None:
     config, storage = _context()
     profile = _require_profile(storage)
     if storage.load_daily(target):
-        console.print(f"[yellow]{target} 已有正式日报。[/yellow]")
+        console.print(f"{target} 已有正式日报。", style="yellow")
         return
     snapshot = _snapshot(config, storage, target)
     _show_context_snapshot(snapshot)
@@ -1546,7 +1573,7 @@ def resume(target_date: str | None = typer.Argument(None)) -> None:
     profile = _require_profile(storage)
     pending = storage.load_pending(target)
     if pending is None:
-        console.print(f"[yellow]没有找到 {target} 的 pending。[/yellow]")
+        console.print(f"没有找到 {target} 的 pending。", style="yellow")
         raise typer.Exit(1)
     snapshot = _snapshot(config, storage, target)
     answers = _collect_answers(
@@ -1568,7 +1595,7 @@ def revise(
     profile = _require_profile(storage)
     record = storage.load_daily(target)
     if record is None:
-        console.print(f"[red]没有找到 {target} 日报。[/red]")
+        console.print(f"没有找到 {target} 日报。", style="red")
         raise typer.Exit(1)
     correction = (correction or typer.prompt("请说明要修改什么")).strip()
     if not correction:
@@ -1587,7 +1614,7 @@ def revise(
                 profile,
             )
     except ProviderError as exc:
-        console.print(f"[red]修订失败：{exc}[/red]")
+        console.print(f"修订失败：{_terminal(exc)}", style="red")
         raise typer.Exit(1) from exc
     accepted = _review_daily(
         draft,
@@ -1624,7 +1651,7 @@ def weekly(week: str | None = typer.Option(None, "--week")) -> None:
     profile = _require_profile(storage)
     selected = week or latest_review_week(date.today())
     if storage.load_weekly(selected):
-        console.print(f"[yellow]{selected} 已有周报。[/yellow]")
+        console.print(f"{_terminal(selected)} 已有周报。", style="yellow")
         return
     _generate_week(selected, config, storage, _provider(config), profile)
 
@@ -1635,7 +1662,7 @@ def notify_user() -> None:
     try:
         send_notification()
     except (OSError, subprocess.SubprocessError) as exc:
-        console.print(f"[red]通知失败：{exc}[/red]")
+        console.print(f"通知失败：{_terminal(exc)}", style="red")
         raise typer.Exit(1) from exc
 
 
@@ -1651,7 +1678,7 @@ def doctor(
 ) -> None:
     """检查配置、画像、数据目录、凭据、提醒和可选 API 连通性。"""
     if details and not api_test:
-        console.print("[red]--details 必须与 --api-test 一起使用：harvest doctor --api-test --details[/red]")
+        console.print("--details 必须与 --api-test 一起使用：harvest doctor --api-test --details", style="red")
         raise typer.Exit(2)
     checks: list[tuple[str, bool, str]] = []
     trace: NetworkTrace | None = None
@@ -1684,7 +1711,9 @@ def doctor(
     failed = False
     for name, ok, detail in checks:
         failed = failed or not ok
-        console.print(f"{'[green]✓[/green]' if ok else '[red]✗[/red]'} {name}: {detail}")
+        line = Text("✓" if ok else "✗", style="green" if ok else "red")
+        line.append(f" {_terminal(name)}: {_terminal(detail)}")
+        console.print(line)
     if trace is not None:
         _show_trace_summary(trace)
         if details:

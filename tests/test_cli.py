@@ -217,7 +217,7 @@ def test_daily_cli_applies_confirmed_project_suggestion(tmp_path, monkeypatch) -
     result = runner.invoke(
         cli.app,
         ["daily", "--date", "2026-09-03"],
-        input="做算法\n\n理解了抵消\n很投入\n吃饭喝水正常\n完成代码\n\n\n",
+        input="做算法\n\n理解了抵消\n很投入\n吃饭喝水正常\n完成代码\n\ny\n",
     )
 
     assert result.exit_code == 0, result.output
@@ -225,6 +225,25 @@ def test_daily_cli_applies_confirmed_project_suggestion(tmp_path, monkeypatch) -
     assert len(projects) == 1
     assert projects[0].name == "算法基础"
     assert projects[0].next_step == "完成摩尔投票实现"
+
+
+def test_project_suggestion_is_not_applied_by_default(tmp_path, monkeypatch) -> None:
+    config = AppConfig(data_dir=tmp_path / "data")
+    storage = Storage(config.data_dir)
+    storage.ensure()
+    suggestion = ProjectSuggestion(
+        action="add",
+        project_name="未经确认的项目",
+        reason="模型建议",
+    )
+    monkeypatch.setattr(cli, "_context", lambda: (config, storage))
+
+    result = runner.invoke(cli.app, ["project", "list"], input="\n")
+    assert result.exit_code == 0
+    monkeypatch.setattr(cli.typer, "confirm", lambda *args, **kwargs: kwargs["default"])
+    cli._confirm_project_updates([suggestion], date(2026, 9, 3), storage)
+
+    assert storage.load_project_memory().projects == []
 
 
 def test_project_commands_manage_status_without_ai(tmp_path, monkeypatch) -> None:

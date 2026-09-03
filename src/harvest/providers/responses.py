@@ -11,6 +11,7 @@ from pydantic import BaseModel, ValidationError
 
 from harvest.config import AppConfig, get_api_key
 from harvest.models import NetworkTrace, Usage
+from harvest.text_safety import sanitize_untrusted_text
 
 
 T = TypeVar("T", bound=BaseModel)
@@ -36,9 +37,16 @@ class ResponsesProvider:
         client: httpx.Client | None = None,
         retry_delays: tuple[float, ...] = (0.25, 0.75),
     ):
+        if provider not in {"deepseek", "openai"}:
+            raise ProviderError("不支持的模型服务商")
+        cleaned_api_key = api_key.strip()
+        if not cleaned_api_key or any(
+            character.isspace() or not character.isprintable() for character in cleaned_api_key
+        ):
+            raise ProviderError("API Key 格式无效：不能包含空白或控制字符")
         self.provider = provider
         self.model = model
-        self.api_key = api_key
+        self.api_key = cleaned_api_key
         self.endpoint = (
             "https://api.deepseek.com/responses"
             if provider == "deepseek"
@@ -109,7 +117,7 @@ class ResponsesProvider:
                 body = response.json()
                 if not isinstance(body, dict):
                     raise ProviderError("模型返回的响应不是 JSON 对象")
-                output_text = _extract_output_text(body)
+                output_text = _extract_output_text(body, api_key=self.api_key)
                 value = _validate_structured_output(output_text, output_type)
                 usage_raw = body.get("usage") or {}
                 usage = Usage(
@@ -141,7 +149,11 @@ class ResponsesProvider:
                 time.sleep(self.retry_delays[attempt])
         if isinstance(last_error, ProviderError):
             raise last_error
-        raise ProviderError(f"无法获得有效的结构化结果：{last_error}") from last_error
+        if isinstance(last_error, (json.JSONDecodeError, ValidationError)):
+            raise ProviderError("无法获得有效的结构化结果：响应格式不符合约定") from last_error
+        if isinstance(last_error, httpx.HTTPError):
+            raise ProviderError("模型网络请求失败；请检查网络后重试") from last_error
+        raise ProviderError("无法获得有效的结构化结果") from last_error
 
 
 def build_provider(config: AppConfig, *, client: httpx.Client | None = None) -> ResponsesProvider:
@@ -156,7 +168,7 @@ def build_provider(config: AppConfig, *, client: httpx.Client | None = None) -> 
     )
 
 
-def _extract_output_text(body: dict) -> str:
+def _extract_output_text(body: dict, *, api_key: str | None = None) -> str:
     direct = body.get("output_text")
     if isinstance(direct, str) and direct.strip():
         return direct
@@ -170,7 +182,8 @@ def _extract_output_text(body: dict) -> str:
     if not chunks:
         error = body.get("error")
         if error:
-            raise ProviderError(f"模型没有返回文本结果：{error}")
+            detail = _redact_sensitive_text(sanitize_untrusted_text(str(error)), api_key=api_key)[:300]
+            raise ProviderError(f"模型没有返回文本结果：{detail}")
         status = body.get("status")
         incomplete = body.get("incomplete_details") or {}
         reason = incomplete.get("reason") if isinstance(incomplete, dict) else None
@@ -223,4 +236,4 @@ def _safe_error_detail(response: httpx.Response, *, api_key: str | None = None) 
             detail = str(error)
     except (ValueError, json.JSONDecodeError):
         detail = response.text or "未知错误"
-    return _redact_sensitive_text(detail, api_key=api_key)[:300]
+    return sanitize_untrusted_text(_redact_sensitive_text(detail, api_key=api_key))[:300]

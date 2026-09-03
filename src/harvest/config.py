@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import tomllib
@@ -75,7 +76,17 @@ class AppConfig:
 
 
 def _toml_string(value: str) -> str:
-    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    # TOML basic strings and JSON strings share the escaping used here.  Using
+    # the standard encoder also covers newlines and other control characters,
+    # so a path cannot turn into a second configuration assignment.
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _validated_api_key(value: str) -> str:
+    cleaned = value.strip()
+    if not cleaned or any(character.isspace() or not character.isprintable() for character in cleaned):
+        raise ValueError("API Key 格式无效：不能包含空白或控制字符")
+    return cleaned
 
 
 def load_config(path: Path = CONFIG_PATH) -> AppConfig:
@@ -124,9 +135,10 @@ def save_config(config: AppConfig, path: Path = CONFIG_PATH) -> None:
 def save_api_key(name: str, value: str, path: Path | None = None) -> None:
     if name not in {"DEEPSEEK_API_KEY", "OPENAI_API_KEY"}:
         raise ValueError("不支持的 API Key 名称")
+    cleaned = _validated_api_key(value)
     if path is not None:
         existing = _read_secret_file(path)
-        existing[name] = value.strip()
+        existing[name] = cleaned
         path.parent.mkdir(parents=True, exist_ok=True)
         body = "".join(f"{key}={item}\n" for key, item in sorted(existing.items()))
         path.write_text(body, encoding="utf-8")
@@ -135,7 +147,7 @@ def save_api_key(name: str, value: str, path: Path | None = None) -> None:
     if keyring is None:
         raise RuntimeError("系统凭据库不可用；请改用环境变量")
     try:
-        keyring.set_password(_keyring_service(), name, value.strip())
+        keyring.set_password(_keyring_service(), name, cleaned)
     except KeyringError as exc:
         raise RuntimeError("系统凭据库不可用；请改用环境变量") from exc
 

@@ -5,9 +5,16 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from harvest.text_safety import sanitize_untrusted_data
+
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="before")
+    @classmethod
+    def remove_unsafe_text(cls, value: Any) -> Any:
+        return sanitize_untrusted_data(value)
 
 
 class ThemeDefinition(StrictModel):
@@ -324,12 +331,20 @@ class FeedbackEvent(StrictModel):
 
 
 class CalibrationState(StrictModel):
-    schema_version: int = 1
+    schema_version: int = 2
     onboarding_version: int = 1
     onboarding_completed: bool = False
     first_daily_date: date | None = None
     five_report_status: Literal["pending", "completed", "dismissed"] = "pending"
     feedback_events: list[FeedbackEvent] = Field(default_factory=list, max_length=100)
+    terminal_safety_version: int = Field(default=1, ge=0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def upgrade_version(cls, value: Any) -> Any:
+        if isinstance(value, dict) and value.get("schema_version", 1) < 2:
+            return {**value, "schema_version": 2, "terminal_safety_version": 0}
+        return value
 
 
 class ProjectItem(StrictModel):

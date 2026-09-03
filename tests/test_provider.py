@@ -224,3 +224,41 @@ def test_provider_redacts_api_key_from_error(body) -> None:
 
     assert "secret" not in str(caught.value)
     assert "[REDACTED]" in str(caught.value)
+
+
+def test_provider_redacts_api_key_from_success_status_error() -> None:
+    body = {"status": "failed", "error": {"message": "Bearer secret is invalid"}, "output": []}
+    client = httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=body)))
+    provider = ResponsesProvider(
+        provider="openai", model="test-model", api_key="secret", client=client, retry_delays=()
+    )
+
+    with pytest.raises(ProviderError) as caught:
+        provider.generate(
+            instructions="system", input_text="input", output_type=DailyHarvest, schema_name="daily"
+        )
+
+    assert "secret" not in str(caught.value)
+    assert "[REDACTED]" in str(caught.value)
+
+
+@pytest.mark.parametrize("api_key", ["secret\nInjected: value", "secret value", "secret\x1b"])
+def test_provider_rejects_unsafe_api_key_before_building_headers(api_key) -> None:
+    with pytest.raises(ProviderError, match="API Key 格式无效"):
+        ResponsesProvider(provider="openai", model="test-model", api_key=api_key)
+
+
+def test_provider_does_not_echo_invalid_model_output_in_validation_error() -> None:
+    attack = "private-content-which-must-not-be-persisted"
+    body = {"output_text": '{"unexpected":"' + attack + '"}', "usage": {}}
+    client = httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=body)))
+    provider = ResponsesProvider(
+        provider="openai", model="test-model", api_key="secret", client=client, retry_delays=()
+    )
+
+    with pytest.raises(ProviderError) as caught:
+        provider.generate(
+            instructions="system", input_text="input", output_type=DailyHarvest, schema_name="daily"
+        )
+
+    assert attack not in str(caught.value)

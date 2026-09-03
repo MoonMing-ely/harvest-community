@@ -2,7 +2,11 @@
 
 ## 1. 启动
 
-clone 仓库后，Linux/macOS 运行 `./run.sh`，Windows PowerShell 运行 `.\run.ps1`。第一次会自动建立 `.venv` 并安装依赖。之后不带参数启动：未完成首次调试时继续向导，已完成时开始今天的正式复盘。
+普通用户从 [GitHub Releases 最新版](https://github.com/MoonMing-ely/harvest-community/releases/latest) 下载与系统匹配的压缩包，解压后直接运行其中的 `harvest-*` 程序。独立版包含 Python 运行时，无需安装 Python 或依赖。Windows 使用 `.zip`；Linux 和 macOS 使用 `.tar.gz`，解压会保留执行权限。macOS 版本尚未签名，首次启动若被系统拦截，需要在“系统设置 → 隐私与安全性”中确认打开。
+
+从源码开发时，clone 仓库后在 Linux/macOS 运行 `./run.sh`，Windows PowerShell 运行 `.\run.ps1`。第一次会按仓库内带哈希的锁文件建立 `.venv` 并安装依赖；锁文件更新时脚本会重建这个项目专用环境，但不会修改 Harvest 数据目录。
+
+之后不带参数启动：未完成首次调试时继续向导，已完成时开始今天的正式复盘。
 
 第一步只选择 AI 服务商和配置 API Key，并发送一次最小真实请求检查 Key、网络和结构化响应。Key 写入系统凭据库；凭据库不可用时请使用 `DEEPSEEK_API_KEY` 或 `OPENAI_API_KEY` 环境变量，不会降级保存明文文件。
 
@@ -68,7 +72,7 @@ harvest project activate "项目名称"
 harvest project complete "项目名称"
 ```
 
-周报沿当前画像的主线总结已有记录；缺失日期只表示未知。AI 提出的项目记忆更新必须由用户确认。
+周报沿当前画像的主线总结已有记录；缺失日期只表示未知。AI 提出的项目记忆更新默认不应用，必须由用户明确输入确认后才会写入。
 
 ## 6. 数据与故障检查
 
@@ -87,5 +91,7 @@ profile/calibration.json
 运行 `harvest doctor` 检查配置、数据目录、画像、凭据和提醒；加 `--api-test` 会发送一次最小真实请求，并只显示连接、格式、耗时和 Token 摘要。
 
 只有排错时才使用 `harvest doctor --api-test --details` 查看本次请求与响应。详情不会写入数据目录，但可能包含个人输入和模型结果，请勿直接公开分享。API Key 和 Authorization 始终不会显示。
+
+Harvest 会在数据进入结构化模型、保存文件和输出终端时清理不可打印控制字符。配置、API Key 和提醒参数也会在写入配置、HTTP 请求或系统任务前校验。旧版生成的日报与周报 Markdown 会在升级后首次运行时自动完成一次安全清理；用户主动指定的外部状态文件只读，不会被改写。
 
 运行 `harvest settings` 可在首次调试之后修改服务商、数据目录和桌面提醒。

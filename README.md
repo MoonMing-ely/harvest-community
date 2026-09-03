@@ -2,9 +2,9 @@
 
 Harvest 是一个本地优先、可校准的个人复盘 CLI。它以人的体验、选择、成长和自我观察为中心，具体项目只是帮助回忆的事实载体。用户 clone 后通过中文向导完成 API 配置、用户画像、个人问题集和真实联网测试，然后即可开始日常复盘。
 
-> [⬇️ 一键下载 Harvest 最新版（ZIP）](https://github.com/MoonMing-ely/harvest-community/archive/refs/heads/main.zip)
+> [⬇️ 下载 Harvest 最新独立版](https://github.com/MoonMing-ely/harvest-community/releases/latest)
 >
-> 下载后解压。Linux/macOS 运行 `./run.sh`，Windows PowerShell 运行 `.\run.ps1`；需要 Python 3.11 或更高版本。
+> 按操作系统下载对应压缩包，解压后直接运行；独立版已经包含 Python，不需要另行安装运行环境。
 
 ## 个性化流程
 
@@ -20,7 +20,16 @@ AI 只总结可观察偏好。工作风格只能作为有依据、低或中置�
 
 ## 安装与首次使用
 
-可以点击上方链接下载 ZIP，也可以执行 `git clone https://github.com/MoonMing-ely/harvest-community.git`。Linux 或 macOS 运行 `./run.sh`，Windows PowerShell 运行 `.\run.ps1`。脚本会创建项目内虚拟环境、安装依赖并打开 Harvest；以后仍使用同一命令。
+普通用户请从 [Releases 最新版](https://github.com/MoonMing-ely/harvest-community/releases/latest) 下载对应文件：
+
+- Windows 64 位：`harvest-windows-x86_64.zip`
+- macOS Apple 芯片：`harvest-macos-arm64.tar.gz`
+- macOS Intel：`harvest-macos-x86_64.tar.gz`
+- Linux 64 位：`harvest-linux-x86_64.tar.gz`
+
+解压后在终端运行其中唯一的 `harvest-*` 程序，不需要 Python。Windows 可在解压目录执行 `.\harvest-windows-x86_64.exe`；Linux/macOS 执行 `./harvest-对应平台`。macOS 独立版尚未签名，首次运行若被 Gatekeeper 拦截，需要在“系统设置 → 隐私与安全性”中确认打开。
+
+源码方式只面向开发者：执行 `git clone https://github.com/MoonMing-ely/harvest-community.git` 后，Linux/macOS 运行 `./run.sh`，Windows PowerShell 运行 `.\run.ps1`。源码脚本需要 Python 3.11+，会按带哈希的依赖锁创建项目内虚拟环境；只有锁文件变化时才会重建 `.venv`，不会影响 Harvest 数据目录。
 
 朋友使用自己的 DeepSeek 或 OpenAI API Key。Key 保存到 Windows Credential Manager、macOS Keychain 或 Linux Secret Service；凭据库不可用时使用 `DEEPSEEK_API_KEY` 或 `OPENAI_API_KEY` 环境变量，程序不会为新用户降级写入明文 Key 文件。
 
@@ -53,8 +62,8 @@ harvest settings
 
 ```bash
 python -m venv .venv
-.venv/bin/python -m pip install -e ".[dev]"
-.venv/bin/pytest
+.venv/bin/python -m pip install --require-hashes -r requirements/dev.lock
+PYTHONPATH=src .venv/bin/python -m pytest
 ```
 
 Windows 激活后的 Python 路径为 `.venv\Scripts\python.exe`。构建当前平台的独立文件：
@@ -63,7 +72,14 @@ Windows 激活后的 Python 路径为 `.venv\Scripts\python.exe`。构建当前�
 .venv/bin/pyinstaller --clean --noconfirm harvest.spec
 ```
 
-打 `v*` 标签后，GitHub Actions 会测试并构建四个平台产物及 SHA-256 校验文件。
+维护者升级依赖时使用 uv 0.12.9 重新生成跨平台锁文件：
+
+```bash
+uv pip compile --universal --generate-hashes pyproject.toml -o requirements/runtime.lock
+uv pip compile --universal --generate-hashes --extra dev pyproject.toml -o requirements/dev.lock
+```
+
+打 `v*` 标签后，GitHub Actions 会测试并构建四个平台的独立压缩包及 SHA-256 校验文件；压缩包中的程序包含 Python 运行时。
 
 ## 隐私边界
 
@@ -75,3 +91,5 @@ Windows 激活后的 Python 路径为 `.venv\Scripts\python.exe`。构建当前�
 - 首次引导只持久化网络测试摘要，不保存请求与响应正文。
 - `doctor --api-test --details` 仅在当前终端显示排错数据；其中可能含有个人输入，请勿直接公开分享。
 - 可选的外部状态文件默认关闭，不会自动读取个人目录。
+- 用户输入、模型文本和外部状态中的终端控制字符会被替换；Rich markup 与超链接不会从这些内容中执行。
+- AI 提出的项目记忆更新默认不应用，必须明确确认后才会写入。

@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from harvest.config import (
     AppConfig,
     ensure_report_profile,
@@ -28,6 +30,25 @@ def test_config_and_secret_round_trip(tmp_path, monkeypatch) -> None:
     assert secret_path.stat().st_mode & 0o777 == 0o600
 
 
+def test_config_strings_cannot_inject_toml_assignments(tmp_path) -> None:
+    config_path = tmp_path / "config.toml"
+    data_dir = tmp_path / 'records\nprovider = "openai"'
+
+    save_config(AppConfig(provider="deepseek", data_dir=data_dir), config_path)
+
+    serialized = config_path.read_text(encoding="utf-8")
+    loaded = load_config(config_path)
+    assert '\\nprovider = \\"openai\\"' in serialized
+    assert loaded.provider == "deepseek"
+    assert loaded.data_dir == data_dir
+
+
+@pytest.mark.parametrize("api_key", ["", "secret\nOPENAI_API_KEY=stolen", "secret value", "secret\x1b"])
+def test_api_key_rejects_whitespace_and_control_characters(tmp_path, api_key) -> None:
+    with pytest.raises(ValueError, match="API Key 格式无效"):
+        save_api_key("OPENAI_API_KEY", api_key, tmp_path / "secrets.env")
+
+
 def test_reminder_is_non_intrusive_and_not_persistent() -> None:
     service = service_text("/opt/harvest notify")
     timer = timer_text("22:00")
@@ -42,6 +63,30 @@ def test_cross_platform_reminder_definitions() -> None:
     assert command[0] == "schtasks"
     assert "22:15" in command
     assert "notify" in command[-2]
+
+
+def test_launchd_escapes_executable_path_as_xml() -> None:
+    plist = launchd_text("22:15", '"/Applications/Harvest & Notes/harvest"')
+
+    assert "Harvest &amp; Notes" in plist
+    assert "Harvest & Notes" not in plist
+
+
+@pytest.mark.parametrize("reminder_time", ["22:15\nOnCalendar=hourly", "24:00", "9:00"])
+def test_reminder_definitions_reject_invalid_time(reminder_time) -> None:
+    with pytest.raises(ValueError, match="HH:MM"):
+        timer_text(reminder_time)
+    with pytest.raises(ValueError, match="HH:MM"):
+        launchd_text(reminder_time)
+    with pytest.raises(ValueError, match="HH:MM"):
+        windows_task_command(reminder_time)
+
+
+def test_reminder_definitions_reject_command_control_characters() -> None:
+    with pytest.raises(ValueError, match="控制字符"):
+        service_text("/opt/harvest notify\nEnvironment=INJECTED=1")
+    with pytest.raises(ValueError, match="控制字符"):
+        launchd_text("22:15", '"/Applications/Harvest\x00/harvest"')
 
 
 def test_report_profile_is_created_private_and_readable(tmp_path) -> None:

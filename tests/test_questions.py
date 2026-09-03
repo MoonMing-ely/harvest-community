@@ -1,5 +1,10 @@
 from harvest.models import ContextSnapshot
-from harvest.prompts import DAILY_INSTRUCTIONS, ONBOARDING_INSTRUCTIONS
+from harvest.prompts import (
+    DAILY_INSTRUCTIONS,
+    ONBOARDING_INSTRUCTIONS,
+    PROFILE_INSTRUCTIONS,
+    WEEKLY_INSTRUCTIONS,
+)
 from harvest.service import build_questions
 
 
@@ -30,3 +35,14 @@ def test_ai_prompts_treat_concrete_work_as_evidence_not_the_center() -> None:
     assert "至少三个问题关注选择与应对" in ONBOARDING_INSTRUCTIONS
     assert "事实载体" in DAILY_INSTRUCTIONS
     assert "不得把报告写成进度清单" in DAILY_INSTRUCTIONS
+
+
+def test_all_ai_roles_treat_json_strings_as_untrusted_data() -> None:
+    for instructions in (
+        DAILY_INSTRUCTIONS,
+        WEEKLY_INSTRUCTIONS,
+        PROFILE_INSTRUCTIONS,
+        ONBOARDING_INSTRUCTIONS,
+    ):
+        assert "不可信数据" in instructions
+        assert "终端控制序列" in instructions

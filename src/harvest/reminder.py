@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import platform
+import re
 import shlex
 import shutil
 import subprocess
 import sys
+from html import escape
 from pathlib import Path
 
 
@@ -12,6 +14,22 @@ SERVICE_NAME = "harvest-reminder.service"
 TIMER_NAME = "harvest-reminder.timer"
 WINDOWS_TASK_NAME = "Harvest Daily Reminder"
 MACOS_LABEL = "io.harvest.reminder"
+REMINDER_TIME_PATTERN = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d")
+
+
+def _validate_reminder_time(reminder_time: str) -> str:
+    if REMINDER_TIME_PATTERN.fullmatch(reminder_time) is None:
+        raise ValueError("提醒时间格式应为 HH:MM")
+    return reminder_time
+
+
+def _validate_command_parts(parts: list[str]) -> list[str]:
+    if not parts or any(
+        not part or any(not character.isprintable() for character in part)
+        for part in parts
+    ):
+        raise ValueError("提醒命令包含无效控制字符")
+    return parts
 
 
 def executable_args() -> list[str]:
@@ -24,7 +42,10 @@ def executable_args() -> list[str]:
 
 
 def service_text(command: str | None = None) -> str:
-    command = command or shlex.join([*executable_args(), "notify"])
+    if command is None:
+        command = shlex.join(_validate_command_parts([*executable_args(), "notify"]))
+    elif any(not character.isprintable() for character in command):
+        raise ValueError("提醒命令包含无效控制字符")
     return "\n".join(
         [
             "[Unit]",
@@ -39,6 +60,7 @@ def service_text(command: str | None = None) -> str:
 
 
 def timer_text(reminder_time: str) -> str:
+    reminder_time = _validate_reminder_time(reminder_time)
     return "\n".join(
         [
             "[Unit]",
@@ -57,9 +79,10 @@ def timer_text(reminder_time: str) -> str:
 
 
 def launchd_text(reminder_time: str, command: str | None = None) -> str:
+    reminder_time = _validate_reminder_time(reminder_time)
     hour, minute = reminder_time.split(":")
-    parts = (shlex.split(command) if command else executable_args()) + ["notify"]
-    arguments = "\n".join(f"        <string>{part}</string>" for part in parts)
+    parts = _validate_command_parts((shlex.split(command) if command else executable_args()) + ["notify"])
+    arguments = "\n".join(f"        <string>{escape(part)}</string>" for part in parts)
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -76,7 +99,10 @@ def launchd_text(reminder_time: str, command: str | None = None) -> str:
 
 
 def windows_task_command(reminder_time: str, command: str | None = None) -> list[str]:
-    parts = (shlex.split(command, posix=False) if command else executable_args()) + ["notify"]
+    reminder_time = _validate_reminder_time(reminder_time)
+    parts = _validate_command_parts(
+        (shlex.split(command, posix=False) if command else executable_args()) + ["notify"]
+    )
     return [
         "schtasks",
         "/Create",

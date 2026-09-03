@@ -1,6 +1,6 @@
 # Harvest Community 技术报告
 
-> v0.5.0 · 个人体验导向与可逆交互
+> v0.5.1 · 终端与供应链安全加固
 
 ## 1. 系统目标
 
@@ -48,13 +48,17 @@ API 最小连通测试
 
 所有用户可见的模型调用由统一状态上下文包裹，终端持续显示动态 dots 和具体任务；退出上下文后无论成功或失败都会停止动画。操作型菜单只接受明确序号并标记推荐项，个性化选择则允许编号、多选和自由文字且不施加推荐。
 
+所有用户输入、模型响应、旧记录和可选外部状态在结构化边界递归净化，只保留可打印字符与规范换行。Rich Console 默认关闭 markup；程序样式使用显式 `Text`，Markdown 预览关闭 hyperlinks。校准状态记录终端安全迁移版本，升级后原子清理既有日报和周报 Markdown，不改写外部状态文件。配置字符串通过标准转义写入 TOML，API Key 与提醒参数在进入凭据库、HTTP Header 或系统任务定义前再次校验；格式校验错误不回显模型原文。
+
+Prompt 将指令与 JSON 数据分离，并明确把 JSON 内字符串视为不可信内容；严格 Schema 限制模型输出形状。项目记忆建议仍需人工确认，且默认选择为不应用。语义提示注入无法被完全消除，但它不能直接执行命令或绕过终端净化。
+
 ## 5. 跨平台层
 
 - 配置目录由 `platformdirs` 解析。
 - API Key 通过 `keyring` 接入系统凭据库；Linux 后端使用 Secret Service。
 - Reminder 模块按平台生成 systemd、launchd 或 Task Scheduler 配置，统一调用无模型副作用的 `harvest notify`。
-- PyInstaller spec 生成单文件 CLI；GitHub Actions 在 Linux、Windows、macOS Intel 和 Apple Silicon 上分别测试和构建。
+- PyInstaller spec 把 Python 解释器和依赖一起封装为单文件 CLI；GitHub Actions 在 Linux、Windows、macOS Intel 和 Apple Silicon 上分别测试和构建，再生成保留 Unix 执行权限的 `.tar.gz` 或 Windows `.zip`。普通用户无需安装 Python。运行与开发依赖分别由跨平台、带哈希的锁文件固定；工作流 Action 固定到完整提交 SHA，构建默认只有只读权限，发布 job 才获得 `contents: write`。
 
 ## 6. 测试重点
 
-自动测试覆盖严格 Schema、动态渲染、旧数据迁移、画像版本、差异计算、主线匹配、pending 生命周期、完整 onboarding、不限轮次修改、回答纠错、重新建档、AI 等待状态、第五份日报触发、跨平台提醒定义、Provider 错误和密钥脱敏。
+自动测试覆盖严格 Schema、动态渲染、旧数据迁移、画像版本、差异计算、主线匹配、pending 生命周期、完整 onboarding、不限轮次修改、回答纠错、重新建档、AI 等待状态、第五份日报触发、跨平台提醒定义、Provider 错误、密钥脱敏、配置与系统任务注入、终端控制字符、Rich markup、旧 Markdown 清理、哈希锁和 CI SHA 固定。
