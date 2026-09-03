@@ -174,6 +174,26 @@ class NetworkTrace(StrictModel):
     usage: Usage
 
 
+class NetworkTraceSummary(StrictModel):
+    provider: str
+    model: str
+    schema_name: str
+    status_code: int
+    elapsed_ms: int = Field(ge=0)
+    usage: Usage
+
+    @classmethod
+    def from_trace(cls, trace: NetworkTrace) -> NetworkTraceSummary:
+        return cls(
+            provider=trace.provider,
+            model=trace.model,
+            schema_name=trace.schema_name,
+            status_code=trace.status_code,
+            elapsed_ms=trace.elapsed_ms,
+            usage=trace.usage,
+        )
+
+
 class DailyRecord(StrictModel):
     schema_version: int = 3
     date: date
@@ -249,7 +269,7 @@ class PendingDaily(StrictModel):
 
 
 class OnboardingPending(StrictModel):
-    schema_version: int = 3
+    schema_version: int = 4
     date: date
     created_at: datetime
     mode: Literal["initial", "rebuild"] = "initial"
@@ -264,12 +284,37 @@ class OnboardingPending(StrictModel):
     proposed_questions: list[DailyQuestion] = Field(default_factory=list, max_length=7)
     sample_record: DailyRecord | None = None
     sample_project_suggestions: list[ProjectSuggestion] = Field(default_factory=list, max_length=2)
-    last_trace: NetworkTrace | None = None
+    last_trace: NetworkTraceSummary | None = None
     trial_run_count: int = Field(default=0, ge=0)
     revision_round: int = Field(default=0, ge=0)
     feedback: list[str] = Field(default_factory=list)
     feedback_categories: list[str] = Field(default_factory=list, max_length=4)
     last_error: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def discard_legacy_trace_payloads(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        migrated = dict(value)
+        trace = migrated.get("last_trace")
+        if isinstance(trace, NetworkTrace):
+            migrated["last_trace"] = NetworkTraceSummary.from_trace(trace)
+        elif isinstance(trace, dict):
+            migrated["last_trace"] = {
+                key: trace[key]
+                for key in (
+                    "provider",
+                    "model",
+                    "schema_name",
+                    "status_code",
+                    "elapsed_ms",
+                    "usage",
+                )
+                if key in trace
+            }
+        migrated["schema_version"] = 4
+        return migrated
 
 
 class FeedbackEvent(StrictModel):

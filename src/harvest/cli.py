@@ -42,6 +42,7 @@ from harvest.models import (
     DailyRecord,
     FeedbackEvent,
     NetworkTrace,
+    NetworkTraceSummary,
     OnboardingPending,
     PendingDaily,
     ProfileContent,
@@ -504,24 +505,30 @@ def _select_feedback() -> tuple[list[str], str] | None:
         return categories, feedback
 
 
-def _show_trace(trace: NetworkTrace, *, include_payloads: bool = False) -> None:
+def _show_trace_summary(trace: NetworkTrace | NetworkTraceSummary) -> None:
     usage = trace.usage
     lines = [
         f"AI 服务商：{trace.provider}",
         f"模型：{trace.model}",
-        f"接口：{trace.endpoint}",
         f"HTTP 状态：{trace.status_code}",
         f"结构名称：{trace.schema_name}",
         f"耗时：{trace.elapsed_ms} ms",
         f"Token：输入 {usage.input_tokens or 0} / 输出 {usage.output_tokens or 0} / 合计 {usage.total_tokens or 0}",
     ]
     console.print(Panel("\n".join(lines), title="网络与格式检查"))
-    if include_payloads:
-        detail = {
-            "request": trace.request_payload,
-            "response": trace.response_payload,
-        }
-        console.print(Panel(json.dumps(detail, ensure_ascii=False, indent=2), title="脱敏技术详情"))
+
+
+def _show_trace_details(trace: NetworkTrace) -> None:
+    console.print(
+        "[yellow]注意：以下技术详情可能包含你输入的个人内容和模型生成结果，"
+        "请勿直接公开分享。API Key 和 Authorization 不会显示。[/yellow]"
+    )
+    detail = {
+        "endpoint": trace.endpoint,
+        "request": trace.request_payload,
+        "response": trace.response_payload,
+    }
+    console.print(Panel(json.dumps(detail, ensure_ascii=False, indent=2), title="技术详情"))
 
 
 def _configure_and_test_api() -> tuple[AppConfig, ResponsesProvider] | None:
@@ -583,9 +590,7 @@ def _configure_and_test_api() -> tuple[AppConfig, ResponsesProvider] | None:
             current = config
             continue
         console.print("[green]✓ API Key、网络与结构化响应均可用。[/green]")
-        _show_trace(trace)
-        if typer.confirm("查看本次测试的脱敏技术详情？", default=False):
-            _show_trace(trace, include_payloads=True)
+        _show_trace_summary(trace)
         return config, provider
 
 
@@ -714,7 +719,7 @@ def _run_trial(
         step="trial_review",
         sample_record=draft.record,
         sample_project_suggestions=draft.project_suggestions,
-        last_trace=trace,
+        last_trace=NetworkTraceSummary.from_trace(trace),
         trial_run_count=pending.trial_run_count + 1,
         last_error=None,
     )
@@ -730,9 +735,7 @@ def _run_trial(
         )
     )
     _show_daily(draft.record, "测试日志 · 不会保存")
-    _show_trace(trace)
-    if typer.confirm("查看本次测试的脱敏请求与响应？", default=False):
-        _show_trace(trace, include_payloads=True)
+    _show_trace_summary(trace)
     return pending
 
 
@@ -763,7 +766,7 @@ def _finish_onboarding(pending: OnboardingPending, storage: Storage) -> None:
             onboarding_version=3, onboarding_completed=True, first_daily_date=None
         )
     storage.save_calibration(calibration)
-    # 删除问卷原文、测试答案、测试报告和网络追踪，只保留用户确认后的画像与问题集。
+    # 删除问卷原文、测试答案、测试报告和网络摘要，只保留用户确认后的画像与问题集。
     storage.delete_onboarding()
     completion = (
         "重新建档已完成；既有正式日报和周报保持不变。"
@@ -904,7 +907,7 @@ def _run_onboarding(
             ):
                 _show_daily(pending.sample_record, "测试日志 · 不会保存")
                 if pending.last_trace is not None:
-                    _show_trace(pending.last_trace)
+                    _show_trace_summary(pending.last_trace)
                 displayed_trial_run = pending.trial_run_count
             if pending.step == "post_revision":
                 console.print(
@@ -1642,9 +1645,16 @@ class _Ping(BaseModel):
 
 
 @app.command()
-def doctor(api_test: bool = typer.Option(False, "--api-test")) -> None:
+def doctor(
+    api_test: bool = typer.Option(False, "--api-test", help="发送一次最小真实请求"),
+    details: bool = typer.Option(False, "--details", help="显示请求与响应技术详情，需配合 --api-test"),
+) -> None:
     """检查配置、画像、数据目录、凭据、提醒和可选 API 连通性。"""
+    if details and not api_test:
+        console.print("[red]--details 必须与 --api-test 一起使用：harvest doctor --api-test --details[/red]")
+        raise typer.Exit(2)
     checks: list[tuple[str, bool, str]] = []
+    trace: NetworkTrace | None = None
     try:
         config = load_config()
         storage = Storage(config.data_dir)
@@ -1662,7 +1672,7 @@ def doctor(api_test: bool = typer.Option(False, "--api-test")) -> None:
         )
         if api_test:
             with _ai_status("正在检查 API 连通性"):
-                result, _ = build_provider(config).generate(
+                result, _, trace = build_provider(config).generate_traced(
                     instructions='只输出 {"status":"ok"}。',
                     input_text="连通性检查",
                     output_type=_Ping,
@@ -1675,6 +1685,10 @@ def doctor(api_test: bool = typer.Option(False, "--api-test")) -> None:
     for name, ok, detail in checks:
         failed = failed or not ok
         console.print(f"{'[green]✓[/green]' if ok else '[red]✗[/red]'} {name}: {detail}")
+    if trace is not None:
+        _show_trace_summary(trace)
+        if details:
+            _show_trace_details(trace)
     if failed:
         raise typer.Exit(1)
 

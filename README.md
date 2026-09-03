@@ -41,6 +41,7 @@ harvest profile restore 1
 
 harvest doctor
 harvest doctor --api-test
+harvest doctor --api-test --details
 harvest settings
 ```
 
@@ -71,4 +72,6 @@ Windows 激活后的 Python 路径为 `.venv\Scripts\python.exe`。构建当前�
 - 生成日报时发送当前回答、结构化画像和精简项目列表给所选模型供应商。
 - 第五份微调会发送五份正式报告和此前的日报修改意见，并在界面中提前说明。
 - 微调完成后删除原始修改意见，只保留画像版本。
+- 首次引导只持久化网络测试摘要，不保存请求与响应正文。
+- `doctor --api-test --details` 仅在当前终端显示排错数据；其中可能含有个人输入，请勿直接公开分享。
 - 可选的外部状态文件默认关闭，不会自动读取个人目录。

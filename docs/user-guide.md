@@ -84,6 +84,8 @@ profile/history/v*.json
 profile/calibration.json
 ```
 
-运行 `harvest doctor` 检查配置、数据目录、画像、凭据和提醒；加 `--api-test` 会发送一次最小真实请求。
+运行 `harvest doctor` 检查配置、数据目录、画像、凭据和提醒；加 `--api-test` 会发送一次最小真实请求，并只显示连接、格式、耗时和 Token 摘要。
+
+只有排错时才使用 `harvest doctor --api-test --details` 查看本次请求与响应。详情不会写入数据目录，但可能包含个人输入和模型结果，请勿直接公开分享。API Key 和 Authorization 始终不会显示。
 
 运行 `harvest settings` 可在首次调试之后修改服务商、数据目录和桌面提醒。

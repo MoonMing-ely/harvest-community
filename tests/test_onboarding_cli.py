@@ -1,3 +1,4 @@
+import json
 from datetime import date, datetime
 
 from typer.testing import CliRunner
@@ -75,7 +76,7 @@ def test_onboarding_saves_only_confirmed_profile_and_questions(tmp_path, monkeyp
 
     guided = ["1", "1", "1", "1", "1", "1", "先复现错误，再缩小输入，最后读文档确认"]
     trial = ["写了代码", "完成接口", "格式不稳定", "用最小输入定位", "正常吃饭", "补测试"]
-    user_input = "\n".join([*guided, "", "1", *trial, "", "", "1"]) + "\n"
+    user_input = "\n".join([*guided, "", "1", *trial, "", "1"]) + "\n"
     result = runner.invoke(cli.app, ["onboard"], input=user_input)
 
     assert result.exit_code == 0, result.output
@@ -89,6 +90,63 @@ def test_onboarding_saves_only_confirmed_profile_and_questions(tmp_path, monkeyp
     assert "测试数据已清除" in result.output
     assert "harvest profile rebuild" in result.output
     assert "harvest revise YYYY-MM-DD" in result.output
+    assert "脱敏" not in result.output
+
+
+def test_trial_persists_trace_summary_without_request_or_response(tmp_path) -> None:
+    config = AppConfig(data_dir=tmp_path / "data")
+    storage = Storage(config.data_dir)
+    storage.ensure()
+    pending = OnboardingPending(
+        date=date(2026, 9, 3),
+        created_at=datetime.now(),
+        proposed_profile=sample_profile().content,
+        proposed_questions=sample_questions(),
+        daily_answers={item.id: "包含个人体验的回答" for item in sample_questions()},
+    )
+
+    result = cli._run_trial(pending, config, OnboardingProvider(), storage)
+
+    assert result is not None
+    saved_text = storage.onboarding_path().read_text(encoding="utf-8")
+    assert '"last_trace"' in saved_text
+    assert '"request_payload"' not in saved_text
+    assert '"response_payload"' not in saved_text
+    assert "包含个人体验的回答" in saved_text  # 回答仍用于中断恢复，由完成建档时清除。
+
+
+def test_legacy_onboarding_trace_discards_payloads_on_load_and_resave(tmp_path) -> None:
+    storage = Storage(tmp_path / "data")
+    storage.ensure()
+    legacy = OnboardingPending(
+        date=date(2026, 9, 3),
+        created_at=datetime.now(),
+        proposed_profile=sample_profile().content,
+        proposed_questions=sample_questions(),
+    ).model_dump(mode="json")
+    legacy["schema_version"] = 3
+    legacy["last_trace"] = {
+        "endpoint": "https://example.test/responses",
+        "provider": "deepseek",
+        "model": "test-model",
+        "schema_name": "daily_harvest_test",
+        "status_code": 200,
+        "elapsed_ms": 12,
+        "request_payload": {"input": "旧的个人回答"},
+        "response_payload": {"output": "旧的模型结果"},
+        "usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+    }
+    storage.onboarding_path().write_text(json.dumps(legacy, ensure_ascii=False), encoding="utf-8")
+
+    pending = storage.load_onboarding()
+
+    assert pending is not None
+    assert pending.schema_version == 4
+    assert pending.last_trace is not None
+    storage.save_onboarding(pending)
+    saved_text = storage.onboarding_path().read_text(encoding="utf-8")
+    assert "旧的个人回答" not in saved_text
+    assert "旧的模型结果" not in saved_text
 
 
 def test_onboarding_persists_each_answer_when_interrupted(tmp_path, monkeypatch) -> None:

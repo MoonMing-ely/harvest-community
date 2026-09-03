@@ -4,7 +4,7 @@ from typer.testing import CliRunner
 
 import harvest.cli as cli
 from harvest.config import AppConfig
-from harvest.models import ContextSnapshot, DailyAnalysis, ProjectSuggestion, Usage
+from harvest.models import ContextSnapshot, DailyAnalysis, NetworkTrace, ProjectSuggestion, Usage
 from harvest.providers import ProviderError
 from harvest.service import make_pending
 from harvest.storage import Storage
@@ -19,6 +19,67 @@ class FakeProvider:
         return DailyAnalysis(report=sample_harvest(), project_suggestions=[]), Usage(
             input_tokens=10, output_tokens=5, total_tokens=15
         )
+
+
+class TracedFakeProvider:
+    def generate_traced(self, *, schema_name, output_type, **kwargs):
+        usage = Usage(input_tokens=3, output_tokens=1, total_tokens=4)
+        trace = NetworkTrace(
+            endpoint="https://example.test/responses",
+            provider="deepseek",
+            model="test-model",
+            schema_name=schema_name,
+            status_code=200,
+            elapsed_ms=8,
+            request_payload={"input": "连通性检查"},
+            response_payload={"status": "completed"},
+            usage=usage,
+        )
+        return output_type(status="ok"), usage, trace
+
+
+def _prepare_doctor(tmp_path, monkeypatch) -> None:
+    config = AppConfig(data_dir=tmp_path / "data")
+    storage = Storage(config.data_dir)
+    storage.ensure()
+    storage.save_profile(sample_profile())
+    config_path = tmp_path / "config.toml"
+    config_path.write_text("provider = 'deepseek'\n", encoding="utf-8")
+    monkeypatch.setattr(cli, "CONFIG_PATH", config_path)
+    monkeypatch.setattr(cli, "load_config", lambda: config)
+    monkeypatch.setattr(cli, "get_api_key_with_source", lambda config: ("secret", "测试凭据"))
+    monkeypatch.setattr(cli, "timer_status", lambda: (True, "测试提醒"))
+    monkeypatch.setattr(cli, "build_provider", lambda config: TracedFakeProvider())
+
+
+def test_doctor_api_test_hides_raw_details_by_default(tmp_path, monkeypatch) -> None:
+    _prepare_doctor(tmp_path, monkeypatch)
+
+    result = runner.invoke(cli.app, ["doctor", "--api-test"])
+
+    assert result.exit_code == 0, result.output
+    assert "网络与格式检查" in result.output
+    assert '"request"' not in result.output
+    assert "可能包含你输入的个人内容" not in result.output
+
+
+def test_doctor_details_is_explicit_and_warns_about_personal_content(tmp_path, monkeypatch) -> None:
+    _prepare_doctor(tmp_path, monkeypatch)
+
+    result = runner.invoke(cli.app, ["doctor", "--api-test", "--details"])
+
+    assert result.exit_code == 0, result.output
+    assert "可能包含你输入的个人内容" in result.output
+    assert '"request"' in result.output
+    assert '"Authorization"' not in result.output
+    assert "secret" not in result.output
+
+
+def test_doctor_details_requires_api_test() -> None:
+    result = runner.invoke(cli.app, ["doctor", "--details"])
+
+    assert result.exit_code == 2
+    assert "harvest doctor --api-test --details" in result.output
 
 
 def empty_snapshot() -> ContextSnapshot:
