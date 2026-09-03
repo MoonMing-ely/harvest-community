@@ -1,0 +1,70 @@
+name: build-release
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: harvest-linux-x86_64
+          - os: windows-latest
+            artifact: harvest-windows-x86_64.exe
+          - os: macos-15-intel
+            artifact: harvest-macos-x86_64
+          - os: macos-15
+            artifact: harvest-macos-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -e ".[dev]"
+      - run: pytest
+      - run: pyinstaller --clean --noconfirm harvest.spec
+      - name: Rename artifact (Unix)
+        if: runner.os != 'Windows'
+        run: mv dist/harvest "dist/${{ matrix.artifact }}"
+      - name: Rename artifact (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Move-Item dist/harvest.exe "dist/${{ matrix.artifact }}"
+      - name: Write SHA-256 (Unix)
+        if: runner.os != 'Windows'
+        working-directory: dist
+        run: shasum -a 256 "${{ matrix.artifact }}" > "${{ matrix.artifact }}.sha256"
+      - name: Write SHA-256 (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        working-directory: dist
+        run: |
+          $hash = (Get-FileHash "${{ matrix.artifact }}" -Algorithm SHA256).Hash.ToLower()
+          "$hash  ${{ matrix.artifact }}" | Set-Content "${{ matrix.artifact }}.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            dist/${{ matrix.artifact }}
+            dist/${{ matrix.artifact }}.sha256
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*

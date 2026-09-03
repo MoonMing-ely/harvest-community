@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "harvest-community"
+version = "0.3.0"
+description = "A local-first, calibrated Daily Harvest and Weekly Review CLI."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "httpx>=0.28,<1",
+  "keyring>=25.6,<27",
+  "platformdirs>=4.3,<5",
+  "secretstorage>=3.3,<4; sys_platform == 'linux'",
+  "pydantic>=2.11,<3",
+  "rich>=14,<15",
+  "typer>=0.16,<1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.4,<10", "pyinstaller>=6.15,<7"]
+
+[project.scripts]
+harvest = "harvest.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
