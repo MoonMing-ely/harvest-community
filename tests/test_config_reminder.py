@@ -1,4 +1,6 @@
 import os
+import subprocess
+from datetime import date, datetime
 from pathlib import Path
 
 import pytest
@@ -13,7 +15,14 @@ from harvest.config import (
     save_api_key,
     save_config,
 )
-from harvest.reminder import launchd_text, service_text, timer_text, windows_task_command
+from harvest.reminder import (
+    launchd_text,
+    reminder_target,
+    send_notification,
+    service_text,
+    timer_text,
+    windows_task_command,
+)
 
 
 def test_config_and_secret_round_trip(tmp_path, monkeypatch) -> None:
@@ -51,12 +60,12 @@ def test_api_key_rejects_whitespace_and_control_characters(tmp_path, api_key) ->
         save_api_key("OPENAI_API_KEY", api_key, tmp_path / "secrets.env")
 
 
-def test_reminder_is_non_intrusive_and_not_persistent() -> None:
+def test_reminder_is_non_intrusive_and_catches_up_after_downtime() -> None:
     service = service_text("/opt/harvest notify")
     timer = timer_text("22:00")
     assert "/opt/harvest notify" in service
     assert "OnCalendar=*-*-* 22:00:00" in timer
-    assert "Persistent=true" not in timer
+    assert "Persistent=true" in timer
 
 
 def test_cross_platform_reminder_definitions() -> None:
@@ -64,7 +73,46 @@ def test_cross_platform_reminder_definitions() -> None:
     command = windows_task_command("22:15", "C:\\Harvest\\harvest.exe")
     assert command[0] == "schtasks"
     assert "22:15" in command
+    assert "/IT" in command
     assert "notify" in command[-2]
+
+
+@pytest.mark.parametrize(
+    ("now", "reminder_time", "expected"),
+    [
+        (datetime(2026, 9, 4, 21, 59), "22:00", None),
+        (datetime(2026, 9, 4, 22, 0), "22:00", date(2026, 9, 4)),
+        (datetime(2026, 9, 4, 23, 30), "22:00", date(2026, 9, 4)),
+        (datetime(2026, 9, 5, 1, 0), "23:00", date(2026, 9, 4)),
+        (datetime(2026, 9, 5, 9, 0), "22:00", None),
+    ],
+)
+def test_reminder_target_uses_a_bounded_catch_up_window(now, reminder_time, expected) -> None:
+    assert reminder_target(reminder_time, now=now) == expected
+
+
+@pytest.mark.parametrize("system", ["Linux", "Darwin", "Windows"])
+def test_notifications_use_non_modal_system_notification_centers(system, monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda command, **kwargs: calls.append(command))
+
+    send_notification(system=system)
+
+    command = calls[0]
+    joined = " ".join(command)
+    if system == "Linux":
+        assert command[0] == "notify-send"
+        assert "--urgency=normal" in command
+        assert "zenity" not in joined
+    elif system == "Darwin":
+        assert command[0] == "osascript"
+        assert "display notification" in joined
+        assert "display dialog" not in joined
+    else:
+        assert command[0] == "powershell.exe"
+        assert "ToastNotificationManager" in joined
+        assert "silent=\"true\"" in joined
+        assert "Popup(" not in joined
 
 
 def test_launchd_escapes_executable_path_as_xml() -> None:

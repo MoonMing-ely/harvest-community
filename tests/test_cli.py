@@ -1,10 +1,10 @@
-from datetime import date
+from datetime import date, datetime
 
 from typer.testing import CliRunner
 
 import harvest.cli as cli
 from harvest.config import AppConfig
-from harvest.models import ContextSnapshot, DailyAnalysis, NetworkTrace, ProjectSuggestion, Usage
+from harvest.models import ContextSnapshot, DailyAnalysis, DailyRecord, NetworkTrace, ProjectSuggestion, Usage
 from harvest.providers import ProviderError
 from harvest.service import make_pending
 from harvest.storage import Storage
@@ -86,7 +86,7 @@ def empty_snapshot() -> ContextSnapshot:
     return ContextSnapshot(active_projects=[], recent_progress=[], last_core_target=None, current_state_hints=[])
 
 
-def test_daily_cli_saves_confirmed_report_without_raw_answers(tmp_path, monkeypatch) -> None:
+def test_daily_cli_saves_generated_report_without_confirmation(tmp_path, monkeypatch) -> None:
     config = AppConfig(data_dir=tmp_path / "data")
     storage = Storage(config.data_dir)
     storage.ensure()
@@ -98,13 +98,16 @@ def test_daily_cli_saves_confirmed_report_without_raw_answers(tmp_path, monkeypa
     result = runner.invoke(
         cli.app,
         ["daily", "--date", "2026-09-01"],
-        input="做算法\n完成一个证明\n理解了净票数\n很累\n吃饭喝水正常\n写完算法\n\n",
+        input="做算法\n完成一个证明\n理解了净票数\n很累\n吃饭喝水正常\n写完算法\n",
     )
 
     assert result.exit_code == 0, result.output
     assert storage.load_daily(date(2026, 9, 1)) is not None
     assert storage.load_pending(date(2026, 9, 1)) is None
     assert "做算法" not in storage.daily_json_path(date(2026, 9, 1)).read_text(encoding="utf-8")
+    assert "报告已生成" in result.output
+    assert "harvest revise 2026-09-01" in result.output
+    assert "[Enter] 保存" not in result.output
 
 
 def test_daily_cli_keeps_pending_when_provider_fails(tmp_path, monkeypatch) -> None:
@@ -184,14 +187,14 @@ def test_daily_cli_continues_incomplete_pending(tmp_path, monkeypatch) -> None:
     result = runner.invoke(
         cli.app,
         ["daily", "--date", "2026-09-05"],
-        input="继续项目\n完成一部分\n很投入\n正常吃饭\n继续下一步\n\n",
+        input="继续项目\n完成一部分\n很投入\n正常吃饭\n继续下一步\n",
     )
 
     assert result.exit_code == 0, result.output
     assert storage.load_daily(date(2026, 9, 5)) is not None
 
 
-def test_daily_cli_applies_confirmed_project_suggestion(tmp_path, monkeypatch) -> None:
+def test_daily_cli_applies_project_suggestion_without_confirmation(tmp_path, monkeypatch) -> None:
     class SuggestingProvider:
         def generate(self, **kwargs):
             return DailyAnalysis(
@@ -217,7 +220,7 @@ def test_daily_cli_applies_confirmed_project_suggestion(tmp_path, monkeypatch) -
     result = runner.invoke(
         cli.app,
         ["daily", "--date", "2026-09-03"],
-        input="做算法\n\n理解了抵消\n很投入\n吃饭喝水正常\n完成代码\n\ny\n",
+        input="做算法\n\n理解了抵消\n很投入\n吃饭喝水正常\n完成代码\n",
     )
 
     assert result.exit_code == 0, result.output
@@ -225,25 +228,84 @@ def test_daily_cli_applies_confirmed_project_suggestion(tmp_path, monkeypatch) -
     assert len(projects) == 1
     assert projects[0].name == "算法基础"
     assert projects[0].next_step == "完成摩尔投票实现"
+    assert "应用以上更新" not in result.output
 
 
-def test_project_suggestion_is_not_applied_by_default(tmp_path, monkeypatch) -> None:
+def test_project_suggestion_is_applied_and_reported_without_confirmation(tmp_path, capsys) -> None:
     config = AppConfig(data_dir=tmp_path / "data")
     storage = Storage(config.data_dir)
     storage.ensure()
     suggestion = ProjectSuggestion(
         action="add",
-        project_name="未经确认的项目",
+        project_name="自动同步的项目",
         reason="模型建议",
     )
+    cli._apply_project_updates([suggestion], date(2026, 9, 3), storage)
+
+    assert [item.name for item in storage.load_project_memory().projects] == ["自动同步的项目"]
+    assert "项目记忆已更新" in capsys.readouterr().out
+
+
+def test_revise_cli_saves_updated_report_without_confirmation(tmp_path, monkeypatch) -> None:
+    target = date(2026, 9, 3)
+    config = AppConfig(data_dir=tmp_path / "data")
+    storage = Storage(config.data_dir)
+    storage.ensure()
+    storage.save_profile(sample_profile())
+    storage.save_daily(
+        DailyRecord(
+            date=target,
+            generated_at=datetime(2026, 9, 3, 22, 0),
+            provider=config.provider,
+            model=config.model,
+            usage=Usage(),
+            report=sample_harvest(),
+        ),
+        "旧日报",
+    )
     monkeypatch.setattr(cli, "_context", lambda: (config, storage))
+    monkeypatch.setattr(cli, "build_provider", lambda config: FakeProvider())
+    monkeypatch.setattr(cli, "_snapshot", lambda config, storage, target: empty_snapshot())
 
-    result = runner.invoke(cli.app, ["project", "list"], input="\n")
-    assert result.exit_code == 0
-    monkeypatch.setattr(cli.typer, "confirm", lambda *args, **kwargs: kwargs["default"])
-    cli._confirm_project_updates([suggestion], date(2026, 9, 3), storage)
+    result = runner.invoke(
+        cli.app,
+        ["revise", "2026-09-03", "--correction", "修正算法题描述"],
+    )
 
-    assert storage.load_project_memory().projects == []
+    assert result.exit_code == 0, result.output
+    assert "日报已更新" in result.output
+    assert "harvest revise 2026-09-03" in result.output
+    assert "[Enter] 保存" not in result.output
+
+
+def test_notify_command_only_sends_when_the_due_report_is_missing(tmp_path, monkeypatch) -> None:
+    target = date(2026, 9, 4)
+    config = AppConfig(data_dir=tmp_path / "data")
+    storage = Storage(config.data_dir)
+    storage.ensure()
+    sent = []
+    monkeypatch.setattr(cli, "load_config", lambda: config)
+    monkeypatch.setattr(cli, "reminder_target", lambda reminder_time: target)
+    monkeypatch.setattr(cli, "send_notification", lambda: sent.append(True))
+
+    missing = runner.invoke(cli.app, ["notify"])
+    assert missing.exit_code == 0, missing.output
+    assert sent == [True]
+
+    storage.save_daily(
+        DailyRecord(
+            date=target,
+            generated_at=datetime(2026, 9, 4, 21, 0),
+            provider=config.provider,
+            model=config.model,
+            usage=Usage(),
+            report=sample_harvest(),
+        ),
+        "已完成日报",
+    )
+    completed = runner.invoke(cli.app, ["notify"])
+    assert completed.exit_code == 0, completed.output
+    assert sent == [True]
 
 
 def test_project_commands_manage_status_without_ai(tmp_path, monkeypatch) -> None:

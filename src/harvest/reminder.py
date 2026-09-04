@@ -6,6 +6,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+from datetime import date, datetime, timedelta
 from html import escape
 from pathlib import Path
 
@@ -15,6 +16,7 @@ TIMER_NAME = "harvest-reminder.timer"
 WINDOWS_TASK_NAME = "Harvest Daily Reminder"
 MACOS_LABEL = "io.harvest.reminder"
 REMINDER_TIME_PATTERN = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d")
+REMINDER_GRACE_MINUTES = 180
 
 
 def _validate_reminder_time(reminder_time: str) -> str:
@@ -30,6 +32,26 @@ def _validate_command_parts(parts: list[str]) -> list[str]:
     ):
         raise ValueError("提醒命令包含无效控制字符")
     return parts
+
+
+def reminder_target(
+    reminder_time: str,
+    *,
+    now: datetime | None = None,
+    grace_minutes: int = REMINDER_GRACE_MINUTES,
+) -> date | None:
+    """Return the report date due for a reminder, within a short catch-up window."""
+    reminder_time = _validate_reminder_time(reminder_time)
+    if grace_minutes < 0:
+        raise ValueError("补提醒窗口不能为负数")
+    current = now or datetime.now().astimezone()
+    hour, minute = (int(part) for part in reminder_time.split(":"))
+    scheduled_today = current.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    for scheduled in (scheduled_today, scheduled_today - timedelta(days=1)):
+        elapsed = current - scheduled
+        if timedelta(0) <= elapsed <= timedelta(minutes=grace_minutes):
+            return scheduled.date()
+    return None
 
 
 def executable_args() -> list[str]:
@@ -68,6 +90,7 @@ def timer_text(reminder_time: str) -> str:
             "",
             "[Timer]",
             f"OnCalendar=*-*-* {reminder_time}:00",
+            "Persistent=true",
             "AccuracySec=1min",
             "Unit=harvest-reminder.service",
             "",
@@ -112,6 +135,7 @@ def windows_task_command(reminder_time: str, command: str | None = None) -> list
         reminder_time,
         "/TN",
         WINDOWS_TASK_NAME,
+        "/IT",
         "/TR",
         subprocess.list2cmdline(parts),
         "/F",
@@ -190,17 +214,39 @@ def timer_status(*, system: str | None = None) -> tuple[bool, str]:
 def send_notification(*, system: str | None = None) -> None:
     system = system or platform.system()
     if system == "Linux":
-        subprocess.run(["notify-send", "Daily Harvest", "到自然断点后，运行 harvest daily。"], check=True)
+        subprocess.run(
+            [
+                "notify-send",
+                "--app-name=Harvest",
+                "--urgency=normal",
+                "--icon=appointment-soon",
+                "Daily Harvest",
+                "今天的日志还没有生成。到自然断点后运行 harvest。",
+            ],
+            check=True,
+        )
     elif system == "Darwin":
         subprocess.run(
-            ["osascript", "-e", 'display notification "到自然断点后，运行 harvest daily。" with title "Daily Harvest"'],
+            [
+                "osascript",
+                "-e",
+                'display notification "今天的日志还没有生成。到自然断点后运行 harvest。" '
+                'with title "Daily Harvest"',
+            ],
             check=True,
         )
     elif system == "Windows":
         script = (
-            "$ws=New-Object -ComObject WScript.Shell;"
-            "$ws.Popup('到自然断点后，运行 harvest daily。',10,'Daily Harvest',64)"
+            "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, "
+            "ContentType = WindowsRuntime] > $null;"
+            "$xml=New-Object Windows.Data.Xml.Dom.XmlDocument;"
+            "$xml.LoadXml('<toast duration=\"short\"><visual><binding template=\"ToastGeneric\">"
+            "<text>Daily Harvest</text><text>今天的日志还没有生成。到自然断点后运行 harvest。</text>"
+            "</binding></visual><audio silent=\"true\"/></toast>');"
+            "$toast=New-Object Windows.UI.Notifications.ToastNotification $xml;"
+            "[Windows.UI.Notifications.ToastNotificationManager]::"
+            "CreateToastNotifier('Harvest').Show($toast)"
         )
-        subprocess.run(["powershell", "-NoProfile", "-Command", script], check=True)
+        subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script], check=True)
     else:
         raise OSError(f"暂不支持的系统：{system}")

@@ -53,7 +53,7 @@ from harvest.models import (
 )
 from harvest.personalization import legacy_profile_content, next_profile, profile_diff
 from harvest.providers import ProviderError, ResponsesProvider, build_provider
-from harvest.reminder import install_reminder, send_notification, timer_status
+from harvest.reminder import install_reminder, reminder_target, send_notification, timer_status
 from harvest.render import render_daily, render_profile, render_weekly
 from harvest.cli_help import ChineseTyper
 from harvest.service import (
@@ -1018,34 +1018,6 @@ def _run_onboarding(
             )
 
 
-def _review_daily(
-    draft: DailyDraft,
-    config: AppConfig,
-    provider: ResponsesProvider,
-    active_projects,
-    profile: UserProfile | ProfileContent,
-    *,
-    on_feedback=None,
-) -> DailyDraft | None:
-    current = draft
-    while True:
-        _show_daily(current.record)
-        action = console.input(
-            Text("[Enter] 保存（推荐）/ 输入修改意见 / q 取消：", style="bold")
-        ).strip()
-        if not action:
-            return current
-        if action.lower() in {"q", "quit", "取消"}:
-            return None
-        if on_feedback is not None:
-            on_feedback(action)
-        try:
-            with _ai_status("正在根据你的意见修改日志"):
-                current = revise_daily(current, action, config, provider, active_projects, profile)
-        except ProviderError as exc:
-            console.print(f"修订失败：{_terminal(exc)}", style="red")
-
-
 def _review_weekly(
     record: WeeklyRecord, config: AppConfig, provider: ResponsesProvider, profile: UserProfile
 ) -> WeeklyRecord | None:
@@ -1066,22 +1038,15 @@ def _review_weekly(
             console.print(f"修订失败：{_terminal(exc)}", style="red")
 
 
-def _confirm_project_updates(
+def _apply_project_updates(
     suggestions: list[ProjectSuggestion], target: date, storage: Storage
 ) -> None:
     if not suggestions:
         return
-    lines = [
-        f"• {item.action} · {item.project_name}：{item.reason}"
-        + (f"；下一步：{item.next_step}" if item.next_step else "")
-        for item in suggestions
-    ]
-    console.print(Panel("\n".join(lines), title="AI 建议更新项目记忆"))
-    if not typer.confirm("应用以上更新？", default=False):
-        return
     updated, applied, skipped = apply_suggestions(storage.load_project_memory(), suggestions, target)
     if applied:
         storage.save_project_memory(updated)
+        console.print("项目记忆已更新：" + "；".join(applied), style="green")
     for item in skipped:
         console.print(f"跳过：{_terminal(item)}", style="yellow")
 
@@ -1103,26 +1068,15 @@ def _process_pending(
         storage.save_pending(pending.model_copy(update={"last_error": str(exc)}))
         console.print(f"AI 处理失败：{_terminal(exc)}", style="red")
         return None
-    accepted = _review_daily(
-        draft,
-        config,
-        provider,
-        snapshot.active_projects,
-        profile,
-        on_feedback=lambda text: _save_feedback(storage, pending.date, text),
-    )
-    if accepted is None:
-        console.print("已取消；原始回答仍保存在 pending。")
-        return None
-    storage.save_daily(accepted.record, render_daily(accepted.record))
+    storage.save_daily(draft.record, render_daily(draft.record))
     storage.delete_pending(pending.date)
-    saved = Text(f"日报已保存：{_terminal(storage.daily_markdown_path(pending.date))}", style="green")
-    saved.append(f"\n如需修改：harvest revise {pending.date.isoformat()}")
+    _apply_project_updates(draft.project_suggestions, pending.date, storage)
+    saved = Text(f"报告已生成：{_terminal(storage.daily_markdown_path(pending.date))}", style="green")
+    saved.append(f"\n如需修改，请运行 harvest revise {pending.date.isoformat()}。")
     console.print(saved)
-    _confirm_project_updates(accepted.project_suggestions, pending.date, storage)
     _maybe_five_report_calibration(config, storage, provider)
     _maybe_weekly(pending.date, config, storage, provider, profile)
-    return accepted.record
+    return draft.record
 
 
 def _proposal_confirm(before: ProfileContent, after: ProfileContent) -> bool:
@@ -1616,16 +1570,11 @@ def revise(
     except ProviderError as exc:
         console.print(f"修订失败：{_terminal(exc)}", style="red")
         raise typer.Exit(1) from exc
-    accepted = _review_daily(
-        draft,
-        config,
-        provider,
-        snapshot.active_projects,
-        profile,
-        on_feedback=lambda text: _save_feedback(storage, target, text),
-    )
-    if accepted:
-        storage.save_daily(accepted.record, render_daily(accepted.record))
+    storage.save_daily(draft.record, render_daily(draft.record))
+    _apply_project_updates(draft.project_suggestions, target, storage)
+    updated = Text(f"日报已更新：{_terminal(storage.daily_markdown_path(target))}", style="green")
+    updated.append(f"\n如需继续修改，请运行 harvest revise {target.isoformat()}。")
+    console.print(updated)
 
 
 @app.command("show")
@@ -1657,11 +1606,19 @@ def weekly(week: str | None = typer.Option(None, "--week")) -> None:
 
 
 @app.command("notify", hidden=True)
-def notify_user() -> None:
-    """由系统定时器调用，只显示本地通知。"""
+def notify_user(force: bool = typer.Option(False, "--force", help="忽略时间和今日日报检查")) -> None:
+    """由系统定时器调用，只显示非模态系统通知。"""
     try:
+        if not force:
+            config = load_config()
+            target = reminder_target(config.reminder_time)
+            if target is None:
+                return
+            storage = Storage(config.data_dir)
+            if storage.load_daily(target) is not None:
+                return
         send_notification()
-    except (OSError, subprocess.SubprocessError) as exc:
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
         console.print(f"通知失败：{_terminal(exc)}", style="red")
         raise typer.Exit(1) from exc
 
